@@ -43,10 +43,10 @@ func EnsureKeystoneEndpoint(ctx context.Context, c client.Client, params Endpoin
 	}
 
 	script := strings.Join([]string{
-		fmt.Sprintf(`openstack service create --name %s --description "%s service" %s || true`, params.ServiceName, params.ServiceName, params.ServiceType),
-		fmt.Sprintf(`openstack endpoint create --region %s %s internal %s || true`, params.Region, params.ServiceType, params.InternalURL),
-		fmt.Sprintf(`openstack endpoint create --region %s %s public %s || true`, params.Region, params.ServiceType, params.PublicURL),
-		fmt.Sprintf(`openstack endpoint create --region %s %s admin %s || true`, params.Region, params.ServiceType, params.AdminURL),
+		fmt.Sprintf(`openstack service show %s >/dev/null 2>&1 || openstack service create --name %s --description "%s service" %s`, params.ServiceName, params.ServiceName, params.ServiceName, params.ServiceType),
+		fmt.Sprintf(`openstack endpoint list --service %s --interface internal --region %s -f value -c ID | grep -q . || openstack endpoint create --region %s %s internal %s`, params.ServiceType, params.Region, params.Region, params.ServiceType, params.InternalURL),
+		fmt.Sprintf(`openstack endpoint list --service %s --interface public --region %s -f value -c ID | grep -q . || openstack endpoint create --region %s %s public %s`, params.ServiceType, params.Region, params.Region, params.ServiceType, params.PublicURL),
+		fmt.Sprintf(`openstack endpoint list --service %s --interface admin --region %s -f value -c ID | grep -q . || openstack endpoint create --region %s %s admin %s`, params.ServiceType, params.Region, params.Region, params.ServiceType, params.AdminURL),
 	}, " && ")
 
 	backoffLimit := int32(6)

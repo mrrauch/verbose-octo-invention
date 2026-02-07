@@ -18,7 +18,7 @@ import (
 func TestRabbitMQReconciler_CreatesStatefulSet(t *testing.T) {
 	scheme := common.SetupScheme()
 	rabbitmq := &openstackv1alpha1.RabbitMQ{
-		ObjectMeta: metav1.ObjectMeta{Name: "rabbitmq", Namespace: "openstack"},
+		ObjectMeta: metav1.ObjectMeta{Name: "rabbitmq", Namespace: "openstack", Finalizers: []string{common.FinalizerName}},
 		Spec:       openstackv1alpha1.RabbitMQServiceSpec{},
 	}
 

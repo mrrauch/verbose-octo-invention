@@ -18,7 +18,7 @@ import (
 func TestMemcachedReconciler_CreatesDeployment(t *testing.T) {
 	scheme := common.SetupScheme()
 	memcached := &openstackv1alpha1.Memcached{
-		ObjectMeta: metav1.ObjectMeta{Name: "memcached", Namespace: "openstack"},
+		ObjectMeta: metav1.ObjectMeta{Name: "memcached", Namespace: "openstack", Finalizers: []string{common.FinalizerName}},
 		Spec:       openstackv1alpha1.MemcachedSpec{},
 	}
 

@@ -20,7 +20,7 @@ import (
 func TestPlacementReconciler_CreatesResources(t *testing.T) {
 	scheme := common.SetupScheme()
 	placement := &openstackv1alpha1.Placement{
-		ObjectMeta: metav1.ObjectMeta{Name: "placement", Namespace: "openstack"},
+		ObjectMeta: metav1.ObjectMeta{Name: "placement", Namespace: "openstack", Finalizers: []string{common.FinalizerName}},
 		Spec: openstackv1alpha1.PlacementSpec{
 			PublicHostname: "placement.example.com",
 			GatewayRef: openstackv1alpha1.GatewayRef{

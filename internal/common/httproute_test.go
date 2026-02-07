@@ -102,3 +102,29 @@ func TestEnsureHTTPRoute_UpdatesWhenSpecDrifts(t *testing.T) {
 		t.Fatalf("expected hostname to be reconciled, got %v", updated.Spec.Hostnames)
 	}
 }
+
+func TestEnsureHTTPRoute_AllowsEmptyHostname(t *testing.T) {
+	scheme := SetupScheme()
+	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	params := HTTPRouteParams{
+		Name:        "placement-api",
+		Namespace:   "openstack",
+		ServiceName: "placement-api",
+		ServicePort: 8778,
+		GatewayName: "openstack-gateway",
+	}
+
+	err := EnsureHTTPRoute(context.Background(), client, params, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	route := &gatewayv1.HTTPRoute{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: "placement-api", Namespace: "openstack"}, route); err != nil {
+		t.Fatalf("expected HTTPRoute to be created: %v", err)
+	}
+	if len(route.Spec.Hostnames) != 0 {
+		t.Fatalf("expected no hostnames for empty hostname input, got %v", route.Spec.Hostnames)
+	}
+}

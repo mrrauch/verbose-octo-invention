@@ -20,7 +20,7 @@ import (
 func TestGlanceReconciler_CreatesResources(t *testing.T) {
 	scheme := common.SetupScheme()
 	glance := &openstackv1alpha1.Glance{
-		ObjectMeta: metav1.ObjectMeta{Name: "glance", Namespace: "openstack"},
+		ObjectMeta: metav1.ObjectMeta{Name: "glance", Namespace: "openstack", Finalizers: []string{common.FinalizerName}},
 		Spec: openstackv1alpha1.GlanceSpec{
 			PublicHostname: "glance.example.com",
 			GatewayRef: openstackv1alpha1.GatewayRef{

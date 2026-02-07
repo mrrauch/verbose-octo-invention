@@ -5,7 +5,6 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -52,6 +51,7 @@ func (r *MemcachedReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if err := r.Update(ctx, instance); err != nil {
 			return ctrl.Result{}, err
 		}
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	// Set status to Progressing
@@ -95,42 +95,24 @@ func (r *MemcachedReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 }
 
 func (r *MemcachedReconciler) ensureService(ctx context.Context, instance *openstackv1alpha1.Memcached) error {
-	svc := &corev1.Service{}
-	err := r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, svc)
-	if err == nil {
-		return nil
-	}
-	if !errors.IsNotFound(err) {
-		return err
-	}
-
-	svc = &corev1.Service{
+	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      instance.Name,
 			Namespace: instance.Namespace,
-			Labels:    labelsForMemcached(instance.Name),
-		},
-		Spec: corev1.ServiceSpec{
-			Selector: labelsForMemcached(instance.Name),
-			Ports: []corev1.ServicePort{
-				{Name: "memcached", Port: 11211, Protocol: corev1.ProtocolTCP},
-			},
 		},
 	}
-	_ = controllerutil.SetOwnerReference(instance, svc, r.Scheme)
-	return r.Create(ctx, svc)
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
+		svc.Labels = labelsForMemcached(instance.Name)
+		svc.Spec.Selector = labelsForMemcached(instance.Name)
+		svc.Spec.Ports = []corev1.ServicePort{
+			{Name: "memcached", Port: 11211, Protocol: corev1.ProtocolTCP},
+		}
+		return controllerutil.SetOwnerReference(instance, svc, r.Scheme)
+	})
+	return err
 }
 
 func (r *MemcachedReconciler) ensureDeployment(ctx context.Context, instance *openstackv1alpha1.Memcached) error {
-	deploy := &appsv1.Deployment{}
-	err := r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, deploy)
-	if err == nil {
-		return nil
-	}
-	if !errors.IsNotFound(err) {
-		return err
-	}
-
 	replicas := int32(1)
 	if instance.Spec.Replicas != nil {
 		replicas = *instance.Spec.Replicas
@@ -138,46 +120,46 @@ func (r *MemcachedReconciler) ensureDeployment(ctx context.Context, instance *op
 
 	image := images.ImageOrDefault(instance.Spec.Image, images.DefaultMemcached)
 
-	deploy = &appsv1.Deployment{
+	deploy := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      instance.Name,
 			Namespace: instance.Namespace,
-			Labels:    labelsForMemcached(instance.Name),
 		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: &replicas,
-			Selector: &metav1.LabelSelector{
-				MatchLabels: labelsForMemcached(instance.Name),
+	}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
+		deploy.Labels = labelsForMemcached(instance.Name)
+		deploy.Spec.Replicas = &replicas
+		deploy.Spec.Selector = &metav1.LabelSelector{
+			MatchLabels: labelsForMemcached(instance.Name),
+		}
+		deploy.Spec.Template = corev1.PodTemplateSpec{
+			ObjectMeta: metav1.ObjectMeta{
+				Labels: labelsForMemcached(instance.Name),
 			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: labelsForMemcached(instance.Name),
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "memcached",
-							Image: image,
-							Ports: []corev1.ContainerPort{
-								{ContainerPort: 11211, Name: "memcached"},
-							},
-							ReadinessProbe: &corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									TCPSocket: &corev1.TCPSocketAction{
-										Port: intstr.FromInt32(11211),
-									},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "memcached",
+						Image: image,
+						Ports: []corev1.ContainerPort{
+							{ContainerPort: 11211, Name: "memcached"},
+						},
+						ReadinessProbe: &corev1.Probe{
+							ProbeHandler: corev1.ProbeHandler{
+								TCPSocket: &corev1.TCPSocketAction{
+									Port: intstr.FromInt32(11211),
 								},
-								InitialDelaySeconds: 5,
-								PeriodSeconds:       5,
 							},
+							InitialDelaySeconds: 5,
+							PeriodSeconds:       5,
 						},
 					},
 				},
 			},
-		},
-	}
-	_ = controllerutil.SetOwnerReference(instance, deploy, r.Scheme)
-	return r.Create(ctx, deploy)
+		}
+		return controllerutil.SetOwnerReference(instance, deploy, r.Scheme)
+	})
+	return err
 }
 
 // SetupWithManager sets up the controller with the Manager.

@@ -14,10 +14,12 @@ import (
 )
 
 // GeneratePassword returns a random hex string of the given length.
-func GeneratePassword(length int) string {
+func GeneratePassword(length int) (string, error) {
 	b := make([]byte, (length+1)/2)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)[:length]
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b)[:length], nil
 }
 
 // EnsureSecret creates a Secret with generated random values for each key if it doesn't exist.
@@ -35,7 +37,11 @@ func EnsureSecret(ctx context.Context, c client.Client, name, namespace string, 
 
 	data := make(map[string][]byte, len(keys))
 	for k, length := range keys {
-		data[k] = []byte(GeneratePassword(length))
+		password, genErr := GeneratePassword(length)
+		if genErr != nil {
+			return genErr
+		}
+		data[k] = []byte(password)
 	}
 
 	secret := &corev1.Secret{

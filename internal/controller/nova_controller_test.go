@@ -22,7 +22,7 @@ func ptr(i int32) *int32 { return &i }
 func TestNovaReconciler_CreatesResources(t *testing.T) {
 	scheme := common.SetupScheme()
 	nova := &openstackv1alpha1.Nova{
-		ObjectMeta: metav1.ObjectMeta{Name: "nova", Namespace: "openstack"},
+		ObjectMeta: metav1.ObjectMeta{Name: "nova", Namespace: "openstack", Finalizers: []string{common.FinalizerName}},
 		Spec: openstackv1alpha1.NovaSpec{
 			PublicHostname:  "nova.example.com",
 			ComputeReplicas: ptr(2),
@@ -85,6 +85,13 @@ func TestNovaReconciler_CreatesResources(t *testing.T) {
 	if err := client.Get(context.Background(), types.NamespacedName{Name: "nova-cell-setup", Namespace: "openstack"}, cellJob); err != nil {
 		t.Fatalf("expected cell-setup job: %v", err)
 	}
+	cellJob.Status.Conditions = append(cellJob.Status.Conditions, batchv1.JobCondition{
+		Type:   batchv1.JobComplete,
+		Status: corev1.ConditionTrue,
+	})
+	_ = client.Status().Update(context.Background(), cellJob)
+
+	_, _ = r.Reconcile(context.Background(), req)
 
 	// Verify nova-api Deployment
 	apiDep := &appsv1.Deployment{}

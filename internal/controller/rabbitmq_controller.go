@@ -6,7 +6,6 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -53,6 +52,7 @@ func (r *RabbitMQReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		if err := r.Update(ctx, instance); err != nil {
 			return ctrl.Result{}, err
 		}
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	// Set status to Progressing
@@ -102,44 +102,26 @@ func (r *RabbitMQReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 }
 
 func (r *RabbitMQReconciler) ensureService(ctx context.Context, instance *openstackv1alpha1.RabbitMQ) error {
-	svc := &corev1.Service{}
-	err := r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, svc)
-	if err == nil {
-		return nil
-	}
-	if !errors.IsNotFound(err) {
-		return err
-	}
-
-	svc = &corev1.Service{
+	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      instance.Name,
 			Namespace: instance.Namespace,
-			Labels:    labelsForRabbitMQ(instance.Name),
-		},
-		Spec: corev1.ServiceSpec{
-			ClusterIP: "None",
-			Selector:  labelsForRabbitMQ(instance.Name),
-			Ports: []corev1.ServicePort{
-				{Name: "amqp", Port: 5672, Protocol: corev1.ProtocolTCP},
-				{Name: "management", Port: 15672, Protocol: corev1.ProtocolTCP},
-			},
 		},
 	}
-	_ = controllerutil.SetOwnerReference(instance, svc, r.Scheme)
-	return r.Create(ctx, svc)
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
+		svc.Labels = labelsForRabbitMQ(instance.Name)
+		svc.Spec.ClusterIP = corev1.ClusterIPNone
+		svc.Spec.Selector = labelsForRabbitMQ(instance.Name)
+		svc.Spec.Ports = []corev1.ServicePort{
+			{Name: "amqp", Port: 5672, Protocol: corev1.ProtocolTCP},
+			{Name: "management", Port: 15672, Protocol: corev1.ProtocolTCP},
+		}
+		return controllerutil.SetOwnerReference(instance, svc, r.Scheme)
+	})
+	return err
 }
 
 func (r *RabbitMQReconciler) ensureStatefulSet(ctx context.Context, instance *openstackv1alpha1.RabbitMQ, secretName string) error {
-	sts := &appsv1.StatefulSet{}
-	err := r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, sts)
-	if err == nil {
-		return nil
-	}
-	if !errors.IsNotFound(err) {
-		return err
-	}
-
 	replicas := int32(1)
 	if instance.Spec.Replicas != nil {
 		replicas = *instance.Spec.Replicas
@@ -152,85 +134,85 @@ func (r *RabbitMQReconciler) ensureStatefulSet(ctx context.Context, instance *op
 		storageSize = resource.MustParse("10Gi")
 	}
 
-	sts = &appsv1.StatefulSet{
+	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      instance.Name,
 			Namespace: instance.Namespace,
-			Labels:    labelsForRabbitMQ(instance.Name),
-		},
-		Spec: appsv1.StatefulSetSpec{
-			ServiceName: instance.Name,
-			Replicas:    &replicas,
-			Selector: &metav1.LabelSelector{
-				MatchLabels: labelsForRabbitMQ(instance.Name),
-			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: labelsForRabbitMQ(instance.Name),
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "rabbitmq",
-							Image: image,
-							Ports: []corev1.ContainerPort{
-								{ContainerPort: 5672, Name: "amqp"},
-								{ContainerPort: 15672, Name: "management"},
-							},
-							Env: []corev1.EnvVar{
-								{
-									Name: "RABBITMQ_DEFAULT_USER",
-									ValueFrom: &corev1.EnvVarSource{
-										SecretKeyRef: &corev1.SecretKeySelector{
-											LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
-											Key:                  "username",
-										},
-									},
-								},
-								{
-									Name: "RABBITMQ_DEFAULT_PASS",
-									ValueFrom: &corev1.EnvVarSource{
-										SecretKeyRef: &corev1.SecretKeySelector{
-											LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
-											Key:                  "password",
-										},
-									},
-								},
-							},
-							VolumeMounts: []corev1.VolumeMount{
-								{Name: "data", MountPath: "/var/lib/rabbitmq"},
-							},
-							ReadinessProbe: &corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									Exec: &corev1.ExecAction{
-										Command: []string{"rabbitmq-diagnostics", "check_port_connectivity"},
-									},
-								},
-								InitialDelaySeconds: 10,
-								PeriodSeconds:       5,
-							},
-						},
-					},
-				},
-			},
-			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
-				{
-					ObjectMeta: metav1.ObjectMeta{Name: "data"},
-					Spec: corev1.PersistentVolumeClaimSpec{
-						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-						Resources: corev1.VolumeResourceRequirements{
-							Requests: corev1.ResourceList{
-								corev1.ResourceStorage: storageSize,
-							},
-						},
-						StorageClassName: instance.Spec.Storage.StorageClassName,
-					},
-				},
-			},
 		},
 	}
-	_ = controllerutil.SetOwnerReference(instance, sts, r.Scheme)
-	return r.Create(ctx, sts)
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, sts, func() error {
+		sts.Labels = labelsForRabbitMQ(instance.Name)
+		sts.Spec.ServiceName = instance.Name
+		sts.Spec.Replicas = &replicas
+		sts.Spec.Selector = &metav1.LabelSelector{
+			MatchLabels: labelsForRabbitMQ(instance.Name),
+		}
+		sts.Spec.Template = corev1.PodTemplateSpec{
+			ObjectMeta: metav1.ObjectMeta{
+				Labels: labelsForRabbitMQ(instance.Name),
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "rabbitmq",
+						Image: image,
+						Ports: []corev1.ContainerPort{
+							{ContainerPort: 5672, Name: "amqp"},
+							{ContainerPort: 15672, Name: "management"},
+						},
+						Env: []corev1.EnvVar{
+							{
+								Name: "RABBITMQ_DEFAULT_USER",
+								ValueFrom: &corev1.EnvVarSource{
+									SecretKeyRef: &corev1.SecretKeySelector{
+										LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+										Key:                  "username",
+									},
+								},
+							},
+							{
+								Name: "RABBITMQ_DEFAULT_PASS",
+								ValueFrom: &corev1.EnvVarSource{
+									SecretKeyRef: &corev1.SecretKeySelector{
+										LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+										Key:                  "password",
+									},
+								},
+							},
+						},
+						VolumeMounts: []corev1.VolumeMount{
+							{Name: "data", MountPath: "/var/lib/rabbitmq"},
+						},
+						ReadinessProbe: &corev1.Probe{
+							ProbeHandler: corev1.ProbeHandler{
+								Exec: &corev1.ExecAction{
+									Command: []string{"rabbitmq-diagnostics", "check_port_connectivity"},
+								},
+							},
+							InitialDelaySeconds: 10,
+							PeriodSeconds:       5,
+						},
+					},
+				},
+			},
+		}
+		sts.Spec.VolumeClaimTemplates = []corev1.PersistentVolumeClaim{
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "data"},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: storageSize,
+						},
+					},
+					StorageClassName: instance.Spec.Storage.StorageClassName,
+				},
+			},
+		}
+		return controllerutil.SetOwnerReference(instance, sts, r.Scheme)
+	})
+	return err
 }
 
 // SetupWithManager sets up the controller with the Manager.

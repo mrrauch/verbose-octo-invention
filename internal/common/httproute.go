@@ -58,12 +58,9 @@ func EnsureHTTPRoute(ctx context.Context, c client.Client, params HTTPRouteParam
 			parent.SectionName = &ln
 		}
 
-		route.Spec = gatewayv1.HTTPRouteSpec{
+		spec := gatewayv1.HTTPRouteSpec{
 			CommonRouteSpec: gatewayv1.CommonRouteSpec{
 				ParentRefs: []gatewayv1.ParentReference{parent},
-			},
-			Hostnames: []gatewayv1.Hostname{
-				gatewayv1.Hostname(params.Hostname),
 			},
 			Rules: []gatewayv1.HTTPRouteRule{
 				{
@@ -80,6 +77,12 @@ func EnsureHTTPRoute(ctx context.Context, c client.Client, params HTTPRouteParam
 				},
 			},
 		}
+		if params.Hostname != "" {
+			spec.Hostnames = []gatewayv1.Hostname{
+				gatewayv1.Hostname(params.Hostname),
+			}
+		}
+		route.Spec = spec
 
 		if owner != nil {
 			return controllerutil.SetOwnerReference(owner, route, c.Scheme())

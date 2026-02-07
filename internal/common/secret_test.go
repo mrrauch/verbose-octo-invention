@@ -54,8 +54,14 @@ func TestEnsureSecret_NoOpWhenExists(t *testing.T) {
 }
 
 func TestGeneratePassword(t *testing.T) {
-	p1 := GeneratePassword(32)
-	p2 := GeneratePassword(32)
+	p1, err := GeneratePassword(32)
+	if err != nil {
+		t.Fatalf("unexpected error generating password: %v", err)
+	}
+	p2, err := GeneratePassword(32)
+	if err != nil {
+		t.Fatalf("unexpected error generating password: %v", err)
+	}
 	if len(p1) != 32 {
 		t.Errorf("expected length 32, got %d", len(p1))
 	}

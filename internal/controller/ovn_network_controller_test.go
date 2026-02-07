@@ -18,7 +18,7 @@ import (
 func TestOVNNetworkReconciler_CreatesResources(t *testing.T) {
 	scheme := common.SetupScheme()
 	ovn := &openstackv1alpha1.OVNNetwork{
-		ObjectMeta: metav1.ObjectMeta{Name: "ovn", Namespace: "openstack"},
+		ObjectMeta: metav1.ObjectMeta{Name: "ovn", Namespace: "openstack", Finalizers: []string{common.FinalizerName}},
 		Spec:       openstackv1alpha1.OVNNetworkSpec{},
 	}
 	client := fake.NewClientBuilder().

@@ -20,7 +20,7 @@ import (
 func TestNeutronReconciler_CreatesResources(t *testing.T) {
 	scheme := common.SetupScheme()
 	neutron := &openstackv1alpha1.Neutron{
-		ObjectMeta: metav1.ObjectMeta{Name: "neutron", Namespace: "openstack"},
+		ObjectMeta: metav1.ObjectMeta{Name: "neutron", Namespace: "openstack", Finalizers: []string{common.FinalizerName}},
 		Spec: openstackv1alpha1.NeutronSpec{
 			PublicHostname: "neutron.example.com",
 			GatewayRef: openstackv1alpha1.GatewayRef{
