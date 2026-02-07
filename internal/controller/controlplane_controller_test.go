@@ -27,7 +27,7 @@ func ready(gen int64) []metav1.Condition {
 func TestControlPlaneReconciler_CreatesInfrastructureCRs(t *testing.T) {
 	scheme := common.SetupScheme()
 	cp := &openstackv1alpha1.OpenStackControlPlane{
-		ObjectMeta: metav1.ObjectMeta{Name: "my-cloud", Namespace: "openstack"},
+		ObjectMeta: metav1.ObjectMeta{Name: "my-cloud", Namespace: "openstack", Finalizers: []string{common.FinalizerName}},
 		Spec: openstackv1alpha1.OpenStackControlPlaneSpec{
 			NetworkBackend: "ovn",
 		},
@@ -45,7 +45,7 @@ func TestControlPlaneReconciler_CreatesInfrastructureCRs(t *testing.T) {
 		name string
 		dst  client.Object
 	}{
-		{name: "my-cloud-mariadb", dst: &openstackv1alpha1.MariaDB{}},
+		{name: "my-cloud-database", dst: &openstackv1alpha1.Database{}},
 		{name: "my-cloud-rabbitmq", dst: &openstackv1alpha1.RabbitMQ{}},
 		{name: "my-cloud-memcached", dst: &openstackv1alpha1.Memcached{}},
 		{name: "my-cloud-ovn", dst: &openstackv1alpha1.OVNNetwork{}},
@@ -65,7 +65,7 @@ func TestControlPlaneReconciler_CreatesInfrastructureCRs(t *testing.T) {
 func TestControlPlaneReconciler_AdvancesToIdentity(t *testing.T) {
 	scheme := common.SetupScheme()
 	cp := &openstackv1alpha1.OpenStackControlPlane{
-		ObjectMeta: metav1.ObjectMeta{Name: "my-cloud", Namespace: "openstack"},
+		ObjectMeta: metav1.ObjectMeta{Name: "my-cloud", Namespace: "openstack", Finalizers: []string{common.FinalizerName}},
 		Spec: openstackv1alpha1.OpenStackControlPlaneSpec{
 			NetworkBackend: "ovn",
 			PublicDomain:   "cloud.example.com",
@@ -78,15 +78,15 @@ func TestControlPlaneReconciler_AdvancesToIdentity(t *testing.T) {
 			Phase: openstackv1alpha1.ControlPlanePhaseInfrastructure,
 		},
 	}
-	mariadb := &openstackv1alpha1.MariaDB{ObjectMeta: metav1.ObjectMeta{Name: "my-cloud-mariadb", Namespace: "openstack"}, Status: openstackv1alpha1.MariaDBStatus{CommonStatus: openstackv1alpha1.CommonStatus{Conditions: ready(1)}}}
+	database := &openstackv1alpha1.Database{ObjectMeta: metav1.ObjectMeta{Name: "my-cloud-database", Namespace: "openstack"}, Status: openstackv1alpha1.DatabaseStatus{CommonStatus: openstackv1alpha1.CommonStatus{Conditions: ready(1)}}}
 	rabbit := &openstackv1alpha1.RabbitMQ{ObjectMeta: metav1.ObjectMeta{Name: "my-cloud-rabbitmq", Namespace: "openstack"}, Status: openstackv1alpha1.RabbitMQStatus{CommonStatus: openstackv1alpha1.CommonStatus{Conditions: ready(1)}}}
 	memcached := &openstackv1alpha1.Memcached{ObjectMeta: metav1.ObjectMeta{Name: "my-cloud-memcached", Namespace: "openstack"}, Status: openstackv1alpha1.MemcachedStatus{CommonStatus: openstackv1alpha1.CommonStatus{Conditions: ready(1)}}}
 	ovn := &openstackv1alpha1.OVNNetwork{ObjectMeta: metav1.ObjectMeta{Name: "my-cloud-ovn", Namespace: "openstack"}, Status: openstackv1alpha1.OVNNetworkStatus{CommonStatus: openstackv1alpha1.CommonStatus{Conditions: ready(1)}}}
 
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(cp, mariadb, rabbit, memcached, ovn).
-		WithStatusSubresource(cp, mariadb, rabbit, memcached, ovn).
+		WithObjects(cp, database, rabbit, memcached, ovn).
+		WithStatusSubresource(cp, database, rabbit, memcached, ovn).
 		Build()
 	r := &ControlPlaneReconciler{Client: c, Scheme: scheme}
 
@@ -118,7 +118,7 @@ func TestControlPlaneReconciler_AdvancesToIdentity(t *testing.T) {
 func TestControlPlaneReconciler_AdvancesToCompute(t *testing.T) {
 	scheme := common.SetupScheme()
 	cp := &openstackv1alpha1.OpenStackControlPlane{
-		ObjectMeta: metav1.ObjectMeta{Name: "my-cloud", Namespace: "openstack"},
+		ObjectMeta: metav1.ObjectMeta{Name: "my-cloud", Namespace: "openstack", Finalizers: []string{common.FinalizerName}},
 		Spec:       openstackv1alpha1.OpenStackControlPlaneSpec{},
 		Status: openstackv1alpha1.OpenStackControlPlaneStatus{
 			Phase: openstackv1alpha1.ControlPlanePhaseCoreServices,

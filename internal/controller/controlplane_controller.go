@@ -48,6 +48,7 @@ func (r *ControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if err := r.Update(ctx, instance); err != nil {
 			return ctrl.Result{}, err
 		}
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	switch instance.Status.Phase {
@@ -68,15 +69,15 @@ func (r *ControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 }
 
-// reconcileInfrastructure creates MariaDB, RabbitMQ, Memcached, and (optionally) OVN child CRs,
+// reconcileInfrastructure creates Database, RabbitMQ, Memcached, and (optionally) OVN child CRs,
 // then advances the phase to Infrastructure.
 func (r *ControlPlaneReconciler) reconcileInfrastructure(ctx context.Context, instance *openstackv1alpha1.OpenStackControlPlane) (ctrl.Result, error) {
 	name := instance.Name
 	ns := instance.Namespace
 
-	if err := r.ensureChildCR(ctx, instance, &openstackv1alpha1.MariaDB{
-		ObjectMeta: metav1.ObjectMeta{Name: name + "-mariadb", Namespace: ns},
-		Spec:       instance.Spec.MariaDB,
+	if err := r.ensureChildCR(ctx, instance, &openstackv1alpha1.Database{
+		ObjectMeta: metav1.ObjectMeta{Name: name + "-database", Namespace: ns},
+		Spec:       instance.Spec.Database,
 	}); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -118,7 +119,7 @@ func (r *ControlPlaneReconciler) reconcileIdentity(ctx context.Context, instance
 	ns := instance.Namespace
 
 	infraReady, err := r.allChildrenReady(ctx, ns, []childCheck{
-		{name: name + "-mariadb", obj: &openstackv1alpha1.MariaDB{}},
+		{name: name + "-database", obj: &openstackv1alpha1.Database{}},
 		{name: name + "-rabbitmq", obj: &openstackv1alpha1.RabbitMQ{}},
 		{name: name + "-memcached", obj: &openstackv1alpha1.Memcached{}},
 	})
@@ -255,16 +256,40 @@ func (r *ControlPlaneReconciler) setPhase(ctx context.Context, instance *opensta
 // ensureChildCR creates a child CR if it does not already exist.
 func (r *ControlPlaneReconciler) ensureChildCR(ctx context.Context, owner *openstackv1alpha1.OpenStackControlPlane, obj client.Object) error {
 	existing := obj.DeepCopyObject().(client.Object)
-	err := r.Get(ctx, types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}, existing)
-	if err == nil {
-		return nil
-	}
-	if !errors.IsNotFound(err) {
-		return err
-	}
+	existing.SetName(obj.GetName())
+	existing.SetNamespace(obj.GetNamespace())
 
-	_ = controllerutil.SetOwnerReference(owner, obj, r.Scheme)
-	return r.Create(ctx, obj)
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, existing, func() error {
+		if err := controllerutil.SetOwnerReference(owner, existing, r.Scheme); err != nil {
+			return err
+		}
+		copyChildSpec(existing, obj)
+		return nil
+	})
+	return err
+}
+
+func copyChildSpec(dst, src client.Object) {
+	switch d := dst.(type) {
+	case *openstackv1alpha1.Database:
+		d.Spec = src.(*openstackv1alpha1.Database).Spec
+	case *openstackv1alpha1.RabbitMQ:
+		d.Spec = src.(*openstackv1alpha1.RabbitMQ).Spec
+	case *openstackv1alpha1.Memcached:
+		d.Spec = src.(*openstackv1alpha1.Memcached).Spec
+	case *openstackv1alpha1.OVNNetwork:
+		d.Spec = src.(*openstackv1alpha1.OVNNetwork).Spec
+	case *openstackv1alpha1.Keystone:
+		d.Spec = src.(*openstackv1alpha1.Keystone).Spec
+	case *openstackv1alpha1.Glance:
+		d.Spec = src.(*openstackv1alpha1.Glance).Spec
+	case *openstackv1alpha1.Placement:
+		d.Spec = src.(*openstackv1alpha1.Placement).Spec
+	case *openstackv1alpha1.Neutron:
+		d.Spec = src.(*openstackv1alpha1.Neutron).Spec
+	case *openstackv1alpha1.Nova:
+		d.Spec = src.(*openstackv1alpha1.Nova).Spec
+	}
 }
 
 // childCheck pairs a child CR name with an empty typed object for readiness checking.
@@ -301,7 +326,7 @@ func (r *ControlPlaneReconciler) isChildReady(ctx context.Context, name, namespa
 // getConditions extracts status conditions from a typed child CR.
 func getConditions(obj client.Object) []metav1.Condition {
 	switch o := obj.(type) {
-	case *openstackv1alpha1.MariaDB:
+	case *openstackv1alpha1.Database:
 		return o.Status.Conditions
 	case *openstackv1alpha1.RabbitMQ:
 		return o.Status.Conditions
@@ -344,7 +369,7 @@ func applyDefaults(hostname *string, gatewayRef *openstackv1alpha1.GatewayRef, s
 func (r *ControlPlaneReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&openstackv1alpha1.OpenStackControlPlane{}).
-		Owns(&openstackv1alpha1.MariaDB{}).
+		Owns(&openstackv1alpha1.Database{}).
 		Owns(&openstackv1alpha1.RabbitMQ{}).
 		Owns(&openstackv1alpha1.Memcached{}).
 		Owns(&openstackv1alpha1.OVNNetwork{}).

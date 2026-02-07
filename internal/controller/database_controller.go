@@ -6,7 +6,6 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -21,17 +20,17 @@ import (
 	"github.com/mrrauch/openstack-operator/internal/images"
 )
 
-// MariaDBReconciler reconciles a MariaDB object.
-type MariaDBReconciler struct {
+// DatabaseReconciler reconciles a Database object.
+type DatabaseReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 }
 
-// Reconcile handles the reconciliation loop for MariaDB resources.
-func (r *MariaDBReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+// Reconcile handles the reconciliation loop for Database resources.
+func (r *DatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	instance := &openstackv1alpha1.MariaDB{}
+	instance := &openstackv1alpha1.Database{}
 	if err := r.Get(ctx, req.NamespacedName, instance); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -53,6 +52,7 @@ func (r *MariaDBReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if err := r.Update(ctx, instance); err != nil {
 			return ctrl.Result{}, err
 		}
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	// Set status to Progressing
@@ -87,7 +87,7 @@ func (r *MariaDBReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if sts.Status.ReadyReplicas == sts.Status.Replicas && sts.Status.ReadyReplicas > 0 {
 		instance.Status.Conditions = common.SetCondition(
 			instance.Status.Conditions, "Ready",
-			metav1.ConditionTrue, "StatefulSetReady", "MariaDB is ready",
+			metav1.ConditionTrue, "StatefulSetReady", "Database is ready",
 			instance.Generation,
 		)
 	}
@@ -101,140 +101,122 @@ func (r *MariaDBReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	return ctrl.Result{}, nil
 }
 
-func (r *MariaDBReconciler) ensureService(ctx context.Context, instance *openstackv1alpha1.MariaDB) error {
-	svc := &corev1.Service{}
-	err := r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, svc)
-	if err == nil {
-		return nil
-	}
-	if !errors.IsNotFound(err) {
-		return err
-	}
-
-	svc = &corev1.Service{
+func (r *DatabaseReconciler) ensureService(ctx context.Context, instance *openstackv1alpha1.Database) error {
+	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      instance.Name,
 			Namespace: instance.Namespace,
-			Labels:    labelsForMariaDB(instance.Name),
-		},
-		Spec: corev1.ServiceSpec{
-			ClusterIP: "None",
-			Selector:  labelsForMariaDB(instance.Name),
-			Ports: []corev1.ServicePort{
-				{Name: "mysql", Port: 3306, Protocol: corev1.ProtocolTCP},
-			},
 		},
 	}
-	_ = controllerutil.SetOwnerReference(instance, svc, r.Scheme)
-	return r.Create(ctx, svc)
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
+		svc.Labels = labelsForDatabase(instance.Name)
+		svc.Spec.ClusterIP = corev1.ClusterIPNone
+		svc.Spec.Selector = labelsForDatabase(instance.Name)
+		svc.Spec.Ports = []corev1.ServicePort{
+			{Name: "postgresql", Port: 5432, Protocol: corev1.ProtocolTCP},
+		}
+		return controllerutil.SetOwnerReference(instance, svc, r.Scheme)
+	})
+	return err
 }
 
-func (r *MariaDBReconciler) ensureStatefulSet(ctx context.Context, instance *openstackv1alpha1.MariaDB, secretName string) error {
-	sts := &appsv1.StatefulSet{}
-	err := r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, sts)
-	if err == nil {
-		return nil
-	}
-	if !errors.IsNotFound(err) {
-		return err
-	}
-
+func (r *DatabaseReconciler) ensureStatefulSet(ctx context.Context, instance *openstackv1alpha1.Database, secretName string) error {
 	replicas := int32(1)
 	if instance.Spec.Replicas != nil {
 		replicas = *instance.Spec.Replicas
 	}
 
-	image := images.ImageOrDefault(instance.Spec.Image, images.DefaultMariaDB)
+	image := images.ImageOrDefault(instance.Spec.Image, images.DefaultPostgreSQL)
 
 	storageSize := instance.Spec.Storage.Size
 	if storageSize.IsZero() {
 		storageSize = resource.MustParse("10Gi")
 	}
 
-	sts = &appsv1.StatefulSet{
+	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      instance.Name,
 			Namespace: instance.Namespace,
-			Labels:    labelsForMariaDB(instance.Name),
-		},
-		Spec: appsv1.StatefulSetSpec{
-			ServiceName: instance.Name,
-			Replicas:    &replicas,
-			Selector: &metav1.LabelSelector{
-				MatchLabels: labelsForMariaDB(instance.Name),
-			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: labelsForMariaDB(instance.Name),
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "mariadb",
-							Image: image,
-							Ports: []corev1.ContainerPort{
-								{ContainerPort: 3306, Name: "mysql"},
-							},
-							Env: []corev1.EnvVar{
-								{
-									Name: "MYSQL_ROOT_PASSWORD",
-									ValueFrom: &corev1.EnvVarSource{
-										SecretKeyRef: &corev1.SecretKeySelector{
-											LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
-											Key:                  "password",
-										},
-									},
-								},
-							},
-							VolumeMounts: []corev1.VolumeMount{
-								{Name: "data", MountPath: "/var/lib/mysql"},
-							},
-							ReadinessProbe: &corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									Exec: &corev1.ExecAction{
-										Command: []string{"mysqladmin", "ping", "-h", "127.0.0.1"},
-									},
-								},
-								InitialDelaySeconds: 10,
-								PeriodSeconds:       5,
-							},
-						},
-					},
-				},
-			},
-			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
-				{
-					ObjectMeta: metav1.ObjectMeta{Name: "data"},
-					Spec: corev1.PersistentVolumeClaimSpec{
-						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-						Resources: corev1.VolumeResourceRequirements{
-							Requests: corev1.ResourceList{
-								corev1.ResourceStorage: storageSize,
-							},
-						},
-						StorageClassName: instance.Spec.Storage.StorageClassName,
-					},
-				},
-			},
 		},
 	}
-	_ = controllerutil.SetOwnerReference(instance, sts, r.Scheme)
-	return r.Create(ctx, sts)
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, sts, func() error {
+		sts.Labels = labelsForDatabase(instance.Name)
+		sts.Spec.ServiceName = instance.Name
+		sts.Spec.Replicas = &replicas
+		sts.Spec.Selector = &metav1.LabelSelector{
+			MatchLabels: labelsForDatabase(instance.Name),
+		}
+		sts.Spec.Template = corev1.PodTemplateSpec{
+			ObjectMeta: metav1.ObjectMeta{
+				Labels: labelsForDatabase(instance.Name),
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "postgresql",
+						Image: image,
+						Ports: []corev1.ContainerPort{
+							{ContainerPort: 5432, Name: "postgresql"},
+						},
+						Env: []corev1.EnvVar{
+							{
+								Name: "POSTGRES_PASSWORD",
+								ValueFrom: &corev1.EnvVarSource{
+									SecretKeyRef: &corev1.SecretKeySelector{
+										LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+										Key:                  "password",
+									},
+								},
+							},
+						},
+						VolumeMounts: []corev1.VolumeMount{
+							{Name: "data", MountPath: "/var/lib/postgresql/data"},
+						},
+						ReadinessProbe: &corev1.Probe{
+							ProbeHandler: corev1.ProbeHandler{
+								Exec: &corev1.ExecAction{
+									Command: []string{"pg_isready", "-U", "postgres"},
+								},
+							},
+							InitialDelaySeconds: 10,
+							PeriodSeconds:       5,
+						},
+					},
+				},
+			},
+		}
+		sts.Spec.VolumeClaimTemplates = []corev1.PersistentVolumeClaim{
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "data"},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: storageSize,
+						},
+					},
+					StorageClassName: instance.Spec.Storage.StorageClassName,
+				},
+			},
+		}
+		return controllerutil.SetOwnerReference(instance, sts, r.Scheme)
+	})
+	return err
 }
 
 // SetupWithManager sets up the controller with the Manager.
-func (r *MariaDBReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *DatabaseReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&openstackv1alpha1.MariaDB{}).
+		For(&openstackv1alpha1.Database{}).
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.Secret{}).
 		Complete(r)
 }
 
-func labelsForMariaDB(name string) map[string]string {
+func labelsForDatabase(name string) map[string]string {
 	return map[string]string{
-		"app.kubernetes.io/name":       "mariadb",
+		"app.kubernetes.io/name":       "database",
 		"app.kubernetes.io/instance":   name,
 		"app.kubernetes.io/managed-by": "openstack-operator",
 	}
