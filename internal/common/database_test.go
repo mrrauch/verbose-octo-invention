@@ -14,13 +14,13 @@ func TestEnsureDatabase_CreatesJob(t *testing.T) {
 	client := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	params := DatabaseParams{
-		Name:          "keystone",
-		Namespace:     "openstack",
-		DatabaseName:  "keystone",
-		Username:      "keystone",
-		SecretName:    "keystone-db-password",
-		MariaDBSecret: "mariadb-root-password",
-		MariaDBHost:   "mariadb.openstack.svc",
+		Name:           "keystone",
+		Namespace:      "openstack",
+		DatabaseName:   "keystone",
+		Username:       "keystone",
+		SecretName:     "keystone-db-password",
+		DatabaseSecret: "database-root-password",
+		DatabaseHost:   "database.openstack.svc",
 	}
 
 	err := EnsureDatabase(context.Background(), client, params, nil)

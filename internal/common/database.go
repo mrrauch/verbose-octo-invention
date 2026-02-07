@@ -15,16 +15,16 @@ import (
 
 // DatabaseParams holds parameters for creating a database and user.
 type DatabaseParams struct {
-	Name          string
-	Namespace     string
-	DatabaseName  string
-	Username      string
-	SecretName    string
-	MariaDBSecret string
-	MariaDBHost   string
+	Name           string
+	Namespace      string
+	DatabaseName   string
+	Username       string
+	SecretName     string
+	DatabaseSecret string
+	DatabaseHost   string
 }
 
-// EnsureDatabase creates a Job that provisions a database and user in MariaDB.
+// EnsureDatabase creates a Job that provisions a database and user in PostgreSQL.
 func EnsureDatabase(ctx context.Context, c client.Client, params DatabaseParams, owner metav1.Object) error {
 	jobName := fmt.Sprintf("%s-db-create", params.Name)
 
@@ -38,8 +38,11 @@ func EnsureDatabase(ctx context.Context, c client.Client, params DatabaseParams,
 	}
 
 	script := fmt.Sprintf(
-		`mysql -h %s -u root -p"$ROOT_PASSWORD" -e "CREATE DATABASE IF NOT EXISTS %s; CREATE USER IF NOT EXISTS '%s'@'%%' IDENTIFIED BY '$SERVICE_PASSWORD'; GRANT ALL ON %s.* TO '%s'@'%%'; FLUSH PRIVILEGES;"`,
-		params.MariaDBHost, params.DatabaseName, params.Username, params.DatabaseName, params.Username,
+		`PGPASSWORD="$ROOT_PASSWORD" psql -h %s -U postgres -tc "SELECT 1 FROM pg_database WHERE datname='%s'" | grep -q 1 || PGPASSWORD="$ROOT_PASSWORD" psql -h %s -U postgres -c "CREATE DATABASE %s"; `+
+			`PGPASSWORD="$ROOT_PASSWORD" psql -h %s -U postgres -c "DO \$\$BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='%s') THEN CREATE ROLE %s LOGIN PASSWORD '$SERVICE_PASSWORD'; END IF; END\$\$; GRANT ALL PRIVILEGES ON DATABASE %s TO %s;"`,
+		params.DatabaseHost, params.DatabaseName,
+		params.DatabaseHost, params.DatabaseName,
+		params.DatabaseHost, params.Username, params.Username, params.DatabaseName, params.Username,
 	)
 
 	backoffLimit := int32(4)
@@ -56,14 +59,14 @@ func EnsureDatabase(ctx context.Context, c client.Client, params DatabaseParams,
 					Containers: []corev1.Container{
 						{
 							Name:    "db-create",
-							Image:   "mariadb:11",
+							Image:   "postgres:17",
 							Command: []string{"sh", "-c", script},
 							Env: []corev1.EnvVar{
 								{
 									Name: "ROOT_PASSWORD",
 									ValueFrom: &corev1.EnvVarSource{
 										SecretKeyRef: &corev1.SecretKeySelector{
-											LocalObjectReference: corev1.LocalObjectReference{Name: params.MariaDBSecret},
+											LocalObjectReference: corev1.LocalObjectReference{Name: params.DatabaseSecret},
 											Key:                  "password",
 										},
 									},
@@ -164,6 +167,23 @@ func IsJobComplete(ctx context.Context, c client.Client, name, namespace string)
 	}
 	for _, cond := range job.Status.Conditions {
 		if cond.Type == batchv1.JobComplete && cond.Status == corev1.ConditionTrue {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// IsJobFailed returns true if the Job has a Failed condition.
+func IsJobFailed(ctx context.Context, c client.Client, name, namespace string) (bool, error) {
+	job := &batchv1.Job{}
+	if err := c.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, job); err != nil {
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	for _, cond := range job.Status.Conditions {
+		if cond.Type == batchv1.JobFailed && cond.Status == corev1.ConditionTrue {
 			return true, nil
 		}
 	}
