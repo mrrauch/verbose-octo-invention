@@ -32,6 +32,14 @@ type NeutronSpec struct {
 	// +kubebuilder:default="geneve"
 	// +optional
 	TunnelType string `json:"tunnelType,omitempty"`
+
+	// PublicHostname overrides the generated external hostname for this API service.
+	// +optional
+	PublicHostname string `json:"publicHostname,omitempty"`
+
+	// GatewayRef overrides the control-plane default gatewayRef for this service.
+	// +optional
+	GatewayRef GatewayRef `json:"gatewayRef,omitempty"`
 }
 
 // NeutronStatus defines the observed state of Neutron.

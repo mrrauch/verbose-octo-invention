@@ -25,6 +25,14 @@ type KeystoneSpec struct {
 	// +kubebuilder:default=24
 	// +optional
 	FernetKeyRotationInterval int32 `json:"fernetKeyRotationInterval,omitempty"`
+
+	// PublicHostname overrides the generated external hostname for this API service.
+	// +optional
+	PublicHostname string `json:"publicHostname,omitempty"`
+
+	// GatewayRef overrides the control-plane default gatewayRef for this service.
+	// +optional
+	GatewayRef GatewayRef `json:"gatewayRef,omitempty"`
 }
 
 // KeystoneStatus defines the observed state of Keystone.

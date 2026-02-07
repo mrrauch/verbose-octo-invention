@@ -11,6 +11,14 @@ type PlacementSpec struct {
 	// Database configures the Placement database connection.
 	// +optional
 	Database DatabaseConfig `json:"database,omitempty"`
+
+	// PublicHostname overrides the generated external hostname for this API service.
+	// +optional
+	PublicHostname string `json:"publicHostname,omitempty"`
+
+	// GatewayRef overrides the control-plane default gatewayRef for this service.
+	// +optional
+	GatewayRef GatewayRef `json:"gatewayRef,omitempty"`
 }
 
 // PlacementStatus defines the observed state of Placement.

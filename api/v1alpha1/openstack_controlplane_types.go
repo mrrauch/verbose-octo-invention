@@ -27,6 +27,16 @@ type OpenStackControlPlaneSpec struct {
 	// +optional
 	TLS TLSConfig `json:"tls,omitempty"`
 
+	// GatewayRef defines the default Gateway used for public API routes.
+	// +optional
+	GatewayRef GatewayRef `json:"gatewayRef,omitempty"`
+
+	// PublicDomain is used to generate default hostnames:
+	// keystone.<publicDomain>, glance.<publicDomain>, etc.
+	// +kubebuilder:default="openstack.local"
+	// +optional
+	PublicDomain string `json:"publicDomain,omitempty"`
+
 	// MariaDB defines the MariaDB deployment spec.
 	MariaDB MariaDBSpec `json:"mariadb,omitempty"`
 

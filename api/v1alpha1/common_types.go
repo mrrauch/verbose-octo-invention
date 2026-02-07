@@ -71,6 +71,21 @@ type StorageConfig struct {
 	StorageClassName *string `json:"storageClassName,omitempty"`
 }
 
+// GatewayRef references a Gateway API Gateway resource for external routing.
+type GatewayRef struct {
+	// Name of the Gateway resource.
+	// +optional
+	Name string `json:"name,omitempty"`
+
+	// Namespace of the Gateway resource. If empty, service namespace is used.
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+
+	// Optional listener name to bind routes to a specific Gateway listener.
+	// +optional
+	ListenerName string `json:"listenerName,omitempty"`
+}
+
 // ConditionType represents the type of a status condition.
 type ConditionType string
 

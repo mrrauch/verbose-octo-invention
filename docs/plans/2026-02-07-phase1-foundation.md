@@ -22,7 +22,7 @@ The base Kubernetes cluster **must** have the following installed before deployi
 | **StorageClass (RWO)** | PVCs for MariaDB, RabbitMQ, OVN databases, Glance images | Any CSI driver | Must be set as default or explicitly named in CR specs. Any CSI-backed StorageClass that supports `ReadWriteOnce` works (e.g., `local-path`, `longhorn`, `ceph-rbd`, `ebs-csi`, `pd-csi`). |
 | **Gateway API CRDs** | Service exposure via HTTPRoute | v1.4.x | Install via `kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.1/standard-install.yaml` |
 | **Gateway API implementation** | Data plane for HTTPRoute | Any conformant | See "Supported Implementations" below |
-| **Gateway resource** | Listener for OpenStack API traffic | — | A `Gateway` resource in the `openstack` namespace (or cross-namespace via `ReferenceGrant`). The operator creates `HTTPRoute` resources that attach to it. |
+| **Gateway resource** | Listener for OpenStack API traffic | — | A `Gateway` resource in the `openstack` namespace by default. Cross-namespace Gateway attachment is supported via `spec.gatewayRef.namespace` + Gateway listener `allowedRoutes` policy. |
 | **cert-manager** (if TLS enabled) | Automated certificate provisioning | v1.14+ | Required when `spec.tls.enabled=true`. Operator references an `Issuer` or `ClusterIssuer` via `spec.tls.issuerRef`. |
 
 ### Storage Details
@@ -67,8 +67,15 @@ kubectl get storageclass -o jsonpath='{range .items[?(@.metadata.annotations.sto
 
 **Operator creates these Gateway API resources:**
 - One `HTTPRoute` per public OpenStack API (Keystone, Glance, Nova, Neutron, Placement)
-- Routes attach to a pre-existing `Gateway` named in `spec.gatewayRef` (or default `openstack-gateway` in same namespace)
+- Routes attach to a pre-existing `Gateway` named in `spec.gatewayRef` (or default `openstack-gateway` in the same namespace)
 - TLS termination is handled by the Gateway listener (via cert-manager), not by the operator
+
+**Required API fields for Gateway routing:**
+- `OpenStackControlPlane.spec.gatewayRef` (name/namespace/listenerName) for default Gateway attachment
+- `OpenStackControlPlane.spec.publicDomain` for default host generation
+- Per-service override fields on Keystone/Glance/Placement/Neutron/Nova specs:
+  - `publicHostname`
+  - `gatewayRef` (optional override)
 
 **Minimal Gateway setup example:**
 ```yaml
@@ -128,7 +135,7 @@ kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/
 Tasks MUST be implemented in this order because later tasks depend on earlier ones:
 
 ```
-Task 1:  Code generation (deepcopy, CRDs) + add Gateway API dependency
+Task 1:  API exposure fields + Gateway API dependency + code generation
 Task 2:  internal/common/conditions.go — used by ALL controllers
 Task 3:  internal/common/secret.go — used by ALL controllers
 Task 4:  internal/common/finalizer.go — used by ALL controllers
@@ -153,9 +160,16 @@ Task 21: Build + E2E acceptance validation
 
 ---
 
-### Task 1: Generate DeepCopy and CRD manifests
+### Task 1: Add API exposure fields, Gateway dependency, and generate manifests
 
 **Files:**
+- Modify: `api/v1alpha1/common_types.go`
+- Modify: `api/v1alpha1/openstack_controlplane_types.go`
+- Modify: `api/v1alpha1/keystone_types.go`
+- Modify: `api/v1alpha1/glance_types.go`
+- Modify: `api/v1alpha1/placement_types.go`
+- Modify: `api/v1alpha1/neutron_types.go`
+- Modify: `api/v1alpha1/nova_types.go`
 - Generated: `api/v1alpha1/zz_generated.deepcopy.go`
 - Generated: `config/crd/bases/*.yaml`
 
@@ -167,7 +181,55 @@ go get sigs.k8s.io/gateway-api@v1.4.1
 go mod tidy
 ```
 
-**Step 2: Run code generation**
+**Step 2: Add Gateway exposure fields to the API types**
+
+Add shared Gateway reference type:
+
+```go
+// api/v1alpha1/common_types.go
+type GatewayRef struct {
+	// Name of the Gateway resource.
+	// +optional
+	Name string `json:"name,omitempty"`
+
+	// Namespace of the Gateway resource. If empty, service namespace is used.
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+
+	// Optional listener name to bind routes to a specific Gateway listener.
+	// +optional
+	ListenerName string `json:"listenerName,omitempty"`
+}
+```
+
+Add control-plane defaults:
+
+```go
+// api/v1alpha1/openstack_controlplane_types.go
+// GatewayRef defines the default Gateway used for public API routes.
+// +optional
+GatewayRef GatewayRef `json:"gatewayRef,omitempty"`
+
+// PublicDomain is used to generate default hostnames:
+// keystone.<publicDomain>, glance.<publicDomain>, etc.
+// +kubebuilder:default="openstack.local"
+// +optional
+PublicDomain string `json:"publicDomain,omitempty"`
+```
+
+Add per-service route fields to Keystone/Glance/Placement/Neutron/Nova specs:
+
+```go
+// PublicHostname overrides the generated external hostname for this API service.
+// +optional
+PublicHostname string `json:"publicHostname,omitempty"`
+
+// GatewayRef overrides the control-plane default gatewayRef for this service.
+// +optional
+GatewayRef GatewayRef `json:"gatewayRef,omitempty"`
+```
+
+**Step 3: Run code generation**
 
 ```bash
 make generate
@@ -175,7 +237,7 @@ make generate
 
 Expected: `zz_generated.deepcopy.go` created, CRD YAML files generated in `config/crd/bases/`.
 
-**Step 3: Verify the build compiles**
+**Step 4: Verify the build compiles**
 
 ```bash
 go build ./...
@@ -183,11 +245,11 @@ go build ./...
 
 Expected: Clean build, no errors.
 
-**Step 4: Commit**
+**Step 5: Commit**
 
 ```bash
 git add -A
-git commit -m "chore: generate deepcopy and CRD manifests"
+git commit -m "feat: add Gateway API exposure fields and regenerate CRDs"
 ```
 
 ---
@@ -1619,7 +1681,7 @@ git commit -m "feat: add Keystone endpoint registration helper"
 
 ### Task 11: HTTPRoute helpers — `internal/common/httproute.go`
 
-Helpers for creating Gateway API HTTPRoute resources to expose OpenStack API endpoints externally.
+Helpers for creating/updating Gateway API HTTPRoute resources to expose OpenStack API endpoints externally.
 
 **Files:**
 - Create: `internal/common/httproute.go`
@@ -1635,6 +1697,7 @@ import (
 	"context"
 	"testing"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -1645,12 +1708,14 @@ func TestEnsureHTTPRoute_CreatesRoute(t *testing.T) {
 	client := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	params := HTTPRouteParams{
-		Name:        "keystone-api",
-		Namespace:   "openstack",
-		Hostname:    "keystone.example.com",
-		ServiceName: "keystone-api",
-		ServicePort: 5000,
-		GatewayName: "openstack-gateway",
+		Name:             "keystone-api",
+		Namespace:        "openstack",
+		Hostname:         "keystone.example.com",
+		ServiceName:      "keystone-api",
+		ServicePort:      5000,
+		GatewayName:      "openstack-gateway",
+		GatewayNamespace: "edge-system",
+		ListenerName:     "https",
 	}
 
 	err := EnsureHTTPRoute(context.Background(), client, params, nil)
@@ -1674,6 +1739,12 @@ func TestEnsureHTTPRoute_CreatesRoute(t *testing.T) {
 	if len(route.Spec.ParentRefs) != 1 || string(route.Spec.ParentRefs[0].Name) != "openstack-gateway" {
 		t.Errorf("expected parentRef openstack-gateway, got %v", route.Spec.ParentRefs)
 	}
+	if route.Spec.ParentRefs[0].Namespace == nil || string(*route.Spec.ParentRefs[0].Namespace) != "edge-system" {
+		t.Errorf("expected parentRef namespace edge-system, got %v", route.Spec.ParentRefs[0].Namespace)
+	}
+	if route.Spec.ParentRefs[0].SectionName == nil || string(*route.Spec.ParentRefs[0].SectionName) != "https" {
+		t.Errorf("expected listener sectionName=https, got %v", route.Spec.ParentRefs[0].SectionName)
+	}
 
 	rules := route.Spec.Rules
 	if len(rules) != 1 || len(rules[0].BackendRefs) != 1 {
@@ -1688,11 +1759,17 @@ func TestEnsureHTTPRoute_CreatesRoute(t *testing.T) {
 	}
 }
 
-func TestEnsureHTTPRoute_NoOpWhenExists(t *testing.T) {
+func TestEnsureHTTPRoute_UpdatesWhenSpecDrifts(t *testing.T) {
 	scheme := SetupScheme()
-	existing := &gatewayv1.HTTPRoute{}
-	existing.Name = "keystone-api"
-	existing.Namespace = "openstack"
+	existing := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "keystone-api",
+			Namespace: "openstack",
+		},
+		Spec: gatewayv1.HTTPRouteSpec{
+			Hostnames: []gatewayv1.Hostname{"old.example.com"},
+		},
+	}
 
 	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
 
@@ -1708,6 +1785,14 @@ func TestEnsureHTTPRoute_NoOpWhenExists(t *testing.T) {
 	err := EnsureHTTPRoute(context.Background(), client, params, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updated := &gatewayv1.HTTPRoute{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: "keystone-api", Namespace: "openstack"}, updated); err != nil {
+		t.Fatalf("get route: %v", err)
+	}
+	if len(updated.Spec.Hostnames) != 1 || string(updated.Spec.Hostnames[0]) != "keystone.example.com" {
+		t.Fatalf("expected hostname to be reconciled, got %v", updated.Spec.Hostnames)
 	}
 }
 ```
@@ -1729,9 +1814,7 @@ package common
 import (
 	"context"
 
-	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -1739,47 +1822,57 @@ import (
 
 // HTTPRouteParams holds parameters for creating a Gateway API HTTPRoute.
 type HTTPRouteParams struct {
-	Name        string // HTTPRoute resource name
-	Namespace   string
-	Hostname    string // External hostname (e.g., "keystone.example.com")
-	ServiceName string // Backend Kubernetes Service name
-	ServicePort int32  // Backend Service port
-	GatewayName string // Name of the Gateway to attach to (default: "openstack-gateway")
+	Name             string // HTTPRoute resource name
+	Namespace        string
+	Hostname         string // External hostname (e.g., "keystone.example.com")
+	ServiceName      string // Backend Kubernetes Service name
+	ServicePort      int32  // Backend Service port
+	GatewayName      string // Name of the Gateway to attach to (default: "openstack-gateway")
+	GatewayNamespace string // Namespace of Gateway (default: same as HTTPRoute namespace)
+	ListenerName     string // Optional Gateway listener name (e.g., "https")
 }
 
-// EnsureHTTPRoute creates an HTTPRoute that routes external traffic to an OpenStack service.
-// Skips creation if the route already exists.
+// EnsureHTTPRoute reconciles an HTTPRoute that routes external traffic to an OpenStack service.
+// It is create-or-update, so hostname/gateway/backend changes are applied on subsequent reconciles.
 func EnsureHTTPRoute(ctx context.Context, c client.Client, params HTTPRouteParams, owner metav1.Object) error {
-	existing := &gatewayv1.HTTPRoute{}
-	err := c.Get(ctx, types.NamespacedName{Name: params.Name, Namespace: params.Namespace}, existing)
-	if err == nil {
-		return nil
-	}
-	if !errors.IsNotFound(err) {
-		return err
+	route := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      params.Name,
+			Namespace: params.Namespace,
+		},
 	}
 
 	gatewayName := params.GatewayName
 	if gatewayName == "" {
 		gatewayName = "openstack-gateway"
 	}
+	gatewayNamespace := params.GatewayNamespace
+	if gatewayNamespace == "" {
+		gatewayNamespace = params.Namespace
+	}
 
 	port := gatewayv1.PortNumber(params.ServicePort)
-	route := &gatewayv1.HTTPRoute{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      params.Name,
-			Namespace: params.Namespace,
-			Labels: map[string]string{
-				"app.kubernetes.io/managed-by": "openstack-operator",
-			},
-		},
-		Spec: gatewayv1.HTTPRouteSpec{
+
+	_, err := controllerutil.CreateOrUpdate(ctx, c, route, func() error {
+		route.Labels = map[string]string{
+			"app.kubernetes.io/managed-by": "openstack-operator",
+		}
+
+		parent := gatewayv1.ParentReference{
+			Name: gatewayv1.ObjectName(gatewayName),
+		}
+		if gatewayNamespace != params.Namespace {
+			ns := gatewayv1.Namespace(gatewayNamespace)
+			parent.Namespace = &ns
+		}
+		if params.ListenerName != "" {
+			ln := gatewayv1.SectionName(params.ListenerName)
+			parent.SectionName = &ln
+		}
+
+		route.Spec = gatewayv1.HTTPRouteSpec{
 			CommonRouteSpec: gatewayv1.CommonRouteSpec{
-				ParentRefs: []gatewayv1.ParentReference{
-					{
-						Name: gatewayv1.ObjectName(gatewayName),
-					},
-				},
+				ParentRefs: []gatewayv1.ParentReference{parent},
 			},
 			Hostnames: []gatewayv1.Hostname{
 				gatewayv1.Hostname(params.Hostname),
@@ -1798,13 +1891,18 @@ func EnsureHTTPRoute(ctx context.Context, c client.Client, params HTTPRouteParam
 					},
 				},
 			},
-		},
+		}
+
+		if owner != nil {
+			return controllerutil.SetOwnerReference(owner, route, c.Scheme())
+		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 
-	if owner != nil {
-		_ = controllerutil.SetOwnerReference(owner, route, c.Scheme())
-	}
-	return c.Create(ctx, route)
+	return nil
 }
 ```
 
@@ -1868,6 +1966,10 @@ spec:
           from: Same
 ```
 
+If you attach routes from a different namespace, update the listener policy:
+- set `allowedRoutes.namespaces.from: All` (or `Selector`)
+- set `spec.gatewayRef.namespace` on the OpenStack control plane/service CRs
+
 **Step 2: Verify valid YAML**
 
 ```bash
@@ -1904,7 +2006,7 @@ Tests should verify:
   - Deployment: `keystone-api`
   - Service: `keystone-api`
   - Job: `keystone-bootstrap`
-  - HTTPRoute: `keystone-api` (hostname from spec or default, attached to `openstack-gateway`)
+  - HTTPRoute: `keystone-api` (hostname from `spec.publicHostname`; parentRef from `spec.gatewayRef`)
 - Missing CR → no error, no requeue
 
 **Step 2: Run test to verify it fails**
@@ -1925,14 +2027,17 @@ Reconcile flow:
 7. Wait for db-sync Job to complete
 8. Ensure Deployment (`keystone-api` on port 5000)
 9. Ensure Service (ClusterIP, port 5000)
-10. Ensure bootstrap (Job: `keystone-bootstrap`, runs `keystone-manage bootstrap`)
-11. Update status with `apiEndpoint` = `http://keystone-api.<namespace>.svc:5000/v3`
+10. Ensure HTTPRoute (`keystone-api`)
+11. Ensure bootstrap (Job: `keystone-bootstrap`, runs `keystone-manage bootstrap`)
+12. Update status with `apiEndpoint` = `http://keystone-api.<namespace>.svc:5000/v3`
 
 Key details:
 - Image: `images.DefaultKeystone`
 - ConfigMap: `keystone-config` with connection strings in env vars
 - Deployment listens on port 5000 (unified keystone port)
-- Bootstrap command: `keystone-manage bootstrap --bootstrap-password $ADMIN_PASSWORD --bootstrap-admin-url http://keystone-api:5000/v3 --bootstrap-internal-url http://keystone-api:5000/v3 --bootstrap-public-url http://keystone-api:5000/v3 --bootstrap-region-id RegionOne`
+- HTTPRoute hostname comes from `keystone.spec.publicHostname` (required for standalone Keystone CRs; auto-populated by control-plane controller for managed child CRs)
+- Gateway parentRef comes from `keystone.spec.gatewayRef` (default `openstack-gateway` in same namespace when empty)
+- Bootstrap public URL must use Gateway hostname, e.g. `https://<publicHostname>/v3` (or `http://` if your Gateway listener is plain HTTP)
 
 **Step 4: Run tests, verify pass**
 
@@ -1978,8 +2083,8 @@ Same pattern as Keystone but:
 - Port: 9292
 - DB name: `glance`
 - db_sync command: `glance-manage db_sync`
-- Endpoint registration: service type `image`, URLs with port 9292
-- HTTPRoute: hostname `glance.<domain>`, backend `glance-api:9292`
+- Endpoint registration: service type `image`; public URL must use Gateway hostname (not cluster service DNS)
+- HTTPRoute: hostname from `glance.spec.publicHostname`, backend `glance-api:9292`
 - For PVC storage backend: mount a PVC at `/var/lib/glance/images/`
 - Status: `apiEndpoint = http://glance-api.<namespace>.svc:9292`
 
@@ -2019,8 +2124,8 @@ go test ./internal/controller/ -v -run TestPlacementReconciler
 - Port: 8778
 - DB name: `placement`
 - db_sync command: `placement-manage db sync`
-- Endpoint: service type `placement`
-- HTTPRoute: hostname `placement.<domain>`, backend `placement-api:8778`
+- Endpoint: service type `placement`; public URL must use Gateway hostname
+- HTTPRoute: hostname from `placement.spec.publicHostname`, backend `placement-api:8778`
 - Status: `apiEndpoint = http://placement-api.<namespace>.svc:8778`
 
 **Step 4: Run tests, verify pass**
@@ -2109,8 +2214,8 @@ go test ./internal/controller/ -v -run TestNeutronReconciler
 - Port: 9696
 - DB name: `neutron`
 - db_sync command: `neutron-db-manage upgrade heads`
-- Endpoint: service type `network`
-- HTTPRoute: hostname `neutron.<domain>`, backend `neutron-server:9696`
+- Endpoint: service type `network`; public URL must use Gateway hostname
+- HTTPRoute: hostname from `neutron.spec.publicHostname`, backend `neutron-server:9696`
 - Env vars include OVN NB/SB connection strings
 - Status: `apiEndpoint = http://neutron-server.<namespace>.svc:9696`
 
@@ -2166,14 +2271,16 @@ Reconcile flow:
 7. Ensure cell setup Job
 8. Ensure Deployments: nova-api, nova-scheduler, nova-conductor, nova-compute
 9. Ensure Service for nova-api (port 8774)
-10. Ensure Keystone endpoint (service type `compute`)
-11. Update status
+10. Ensure HTTPRoute for nova-api
+11. Ensure Keystone endpoint (service type `compute`; public URL uses Gateway hostname)
+12. Update status
 
 Key details:
 - nova-api: image `images.DefaultNovaAPI`, port 8774
 - nova-scheduler: image `images.DefaultNovaScheduler`, no external port
 - nova-conductor: image `images.DefaultNovaConductor`, no external port
 - nova-compute: image `images.DefaultNovaCompute`, needs privileged for libvirt, `computeReplicas` from spec
+- HTTPRoute: hostname from `nova.spec.publicHostname`, backend `nova-api:8774`
 - All share RabbitMQ and DB connection env vars
 
 **Step 4: Run tests, verify pass**
@@ -2267,7 +2374,14 @@ func TestControlPlaneReconciler_AdvancesToIdentity(t *testing.T) {
 	scheme := common.SetupScheme()
 	cp := &openstackv1alpha1.OpenStackControlPlane{
 		ObjectMeta: metav1.ObjectMeta{Name: "my-cloud", Namespace: "openstack"},
-		Spec: openstackv1alpha1.OpenStackControlPlaneSpec{NetworkBackend: "ovn"},
+		Spec: openstackv1alpha1.OpenStackControlPlaneSpec{
+			NetworkBackend: "ovn",
+			PublicDomain:   "cloud.example.com",
+			GatewayRef: openstackv1alpha1.GatewayRef{
+				Name:      "edge-gw",
+				Namespace: "edge-system",
+			},
+		},
 		Status: openstackv1alpha1.OpenStackControlPlaneStatus{
 			Phase: openstackv1alpha1.ControlPlanePhaseInfrastructure,
 		},
@@ -2292,6 +2406,14 @@ func TestControlPlaneReconciler_AdvancesToIdentity(t *testing.T) {
 
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "my-cloud-keystone", Namespace: "openstack"}, &openstackv1alpha1.Keystone{}); err != nil {
 		t.Fatalf("expected Keystone CR to be created: %v", err)
+	}
+	ks := &openstackv1alpha1.Keystone{}
+	_ = c.Get(context.Background(), types.NamespacedName{Name: "my-cloud-keystone", Namespace: "openstack"}, ks)
+	if ks.Spec.PublicHostname != "keystone.cloud.example.com" {
+		t.Fatalf("expected default public hostname, got %q", ks.Spec.PublicHostname)
+	}
+	if ks.Spec.GatewayRef.Name != "edge-gw" || ks.Spec.GatewayRef.Namespace != "edge-system" {
+		t.Fatalf("expected inherited gatewayRef edge-system/edge-gw, got %s/%s", ks.Spec.GatewayRef.Namespace, ks.Spec.GatewayRef.Name)
 	}
 	fresh := &openstackv1alpha1.OpenStackControlPlane{}
 	_ = c.Get(context.Background(), types.NamespacedName{Name: "my-cloud", Namespace: "openstack"}, fresh)
@@ -2350,14 +2472,16 @@ Reconcile flow:
    - Wait for all infra to be Ready → advance to Identity
 3. Phase: Identity
    - Ensure Keystone CR (from `spec.keystone`)
+   - If empty, set child `keystone.spec.publicHostname = keystone.<controlPlane.spec.publicDomain>`
+   - If empty, inherit child `keystone.spec.gatewayRef = controlPlane.spec.gatewayRef`
    - Wait for Keystone Ready → advance to CoreServices
 4. Phase: CoreServices
-   - Ensure Glance CR
-   - Ensure Placement CR
-   - Ensure Neutron CR
+   - Ensure Glance CR (set/inherit `publicHostname` + `gatewayRef` defaults)
+   - Ensure Placement CR (set/inherit `publicHostname` + `gatewayRef` defaults)
+   - Ensure Neutron CR (set/inherit `publicHostname` + `gatewayRef` defaults)
    - Wait for all core service APIs to be Ready → advance to Compute
 5. Phase: Compute
-   - Ensure Nova CR
+   - Ensure Nova CR (set/inherit `publicHostname` + `gatewayRef` defaults)
    - Wait for Nova Ready → advance to Ready
 6. Update phase + conditions
 
@@ -2569,7 +2693,7 @@ git commit -m "chore: fix lint and build issues"
 
 | Task | Component | Files Created | Tests |
 |------|-----------|---------------|-------|
-| 1 | Code generation + Gateway API dep | `zz_generated.deepcopy.go`, CRD YAMLs | - |
+| 1 | API exposure fields + generation | API type updates, `zz_generated.deepcopy.go`, CRD YAMLs | - |
 | 2 | Condition helpers | `internal/common/conditions.go` | 3 tests |
 | 3 | Secret helpers | `internal/common/secret.go`, `scheme.go` | 3 tests |
 | 4 | Finalizer helpers | `internal/common/finalizer.go` | 3 tests |

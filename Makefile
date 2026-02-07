@@ -77,7 +77,7 @@ undeploy: ## Undeploy operator from the cluster.
 .PHONY: controller-gen
 controller-gen: $(CONTROLLER_GEN) ## Install controller-gen.
 $(CONTROLLER_GEN): $(LOCALBIN)
-	GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.15.0
+	GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.17.2
 
 $(LOCALBIN):
 	mkdir -p $(LOCALBIN)

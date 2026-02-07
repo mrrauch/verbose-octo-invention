@@ -30,6 +30,14 @@ type GlanceSpec struct {
 	// +kubebuilder:default="glance-images"
 	// +optional
 	CephPoolName string `json:"cephPoolName,omitempty"`
+
+	// PublicHostname overrides the generated external hostname for this API service.
+	// +optional
+	PublicHostname string `json:"publicHostname,omitempty"`
+
+	// GatewayRef overrides the control-plane default gatewayRef for this service.
+	// +optional
+	GatewayRef GatewayRef `json:"gatewayRef,omitempty"`
 }
 
 // GlanceStatus defines the observed state of Glance.
