@@ -216,15 +216,15 @@ type OpenStackControlPlaneSpec struct {
 type ControlPlanePhase string
 
 const (
-	ControlPlanePhasePending            ControlPlanePhase = "Pending"
-	ControlPlanePhaseInfrastructure     ControlPlanePhase = "Infrastructure"
-	ControlPlanePhaseIdentity           ControlPlanePhase = "Identity"
-	ControlPlanePhaseCoreServices       ControlPlanePhase = "CoreServices"
-	ControlPlanePhaseCompute            ControlPlanePhase = "Compute"
-	ControlPlanePhaseExtendedServices   ControlPlanePhase = "ExtendedServices"
-	ControlPlanePhaseDashboards         ControlPlanePhase = "Dashboards"
-	ControlPlanePhaseReady              ControlPlanePhase = "Ready"
-	ControlPlanePhaseFailed             ControlPlanePhase = "Failed"
+	ControlPlanePhasePending          ControlPlanePhase = "Pending"
+	ControlPlanePhaseInfrastructure   ControlPlanePhase = "Infrastructure"
+	ControlPlanePhaseIdentity         ControlPlanePhase = "Identity"
+	ControlPlanePhaseCoreServices     ControlPlanePhase = "CoreServices"
+	ControlPlanePhaseCompute          ControlPlanePhase = "Compute"
+	ControlPlanePhaseExtendedServices ControlPlanePhase = "ExtendedServices"
+	ControlPlanePhaseDashboards       ControlPlanePhase = "Dashboards"
+	ControlPlanePhaseReady            ControlPlanePhase = "Ready"
+	ControlPlanePhaseFailed           ControlPlanePhase = "Failed"
 )
 
 // OpenStackControlPlaneStatus defines the observed state of OpenStackControlPlane.
