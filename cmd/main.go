@@ -10,8 +10,10 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	openstackv1alpha1 "github.com/mrrauch/openstack-operator/api/v1alpha1"
+	"github.com/mrrauch/openstack-operator/internal/controller"
 )
 
 var (
@@ -21,6 +23,7 @@ var (
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(gatewayv1.Install(scheme))
 	utilruntime.Must(openstackv1alpha1.AddToScheme(scheme))
 }
 
@@ -50,15 +53,27 @@ func main() {
 		os.Exit(1)
 	}
 
-	// TODO: Register controllers here as they are implemented.
-	// Example:
-	// if err = (&controller.OpenStackControlPlaneReconciler{
-	//     Client: mgr.GetClient(),
-	//     Scheme: mgr.GetScheme(),
-	// }).SetupWithManager(mgr); err != nil {
-	//     setupLog.Error(err, "unable to create controller", "controller", "OpenStackControlPlane")
-	//     os.Exit(1)
-	// }
+	controllers := []struct {
+		name  string
+		setup func(mgr ctrl.Manager) error
+	}{
+		{"MariaDB", (&controller.MariaDBReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
+		{"RabbitMQ", (&controller.RabbitMQReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
+		{"Memcached", (&controller.MemcachedReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
+		{"OVNNetwork", (&controller.OVNNetworkReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
+		{"Keystone", (&controller.KeystoneReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
+		{"Glance", (&controller.GlanceReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
+		{"Placement", (&controller.PlacementReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
+		{"Neutron", (&controller.NeutronReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
+		{"Nova", (&controller.NovaReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
+		{"OpenStackControlPlane", (&controller.ControlPlaneReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
+	}
+	for _, c := range controllers {
+		if err := c.setup(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", c.name)
+			os.Exit(1)
+		}
+	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up health check")
