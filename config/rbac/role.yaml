@@ -1,0 +1,38 @@
+# This file is a placeholder. The actual RBAC role will be generated
+# by controller-gen from +kubebuilder:rbac markers in the controller code.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: openstack-operator-role
+rules:
+  # Core resources
+  - apiGroups: [""]
+    resources: [configmaps, secrets, services, pods, persistentvolumeclaims, events]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: ["apps"]
+    resources: [deployments, statefulsets, daemonsets]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: ["batch"]
+    resources: [jobs, cronjobs]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: ["networking.k8s.io"]
+    resources: [ingresses]
+    verbs: [get, list, watch, create, update, patch, delete]
+  # OpenStack CRDs
+  - apiGroups: ["openstack.k8s.io"]
+    resources: ["*"]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: ["openstack.k8s.io"]
+    resources: ["*/status"]
+    verbs: [get, update, patch]
+  - apiGroups: ["openstack.k8s.io"]
+    resources: ["*/finalizers"]
+    verbs: [update]
+  # Rook Ceph CRDs (for CephStorage controller)
+  - apiGroups: ["ceph.rook.io"]
+    resources: [cephclusters, cephblockpools, cephclients]
+    verbs: [get, list, watch, create, update, patch, delete]
+  # Leader election
+  - apiGroups: ["coordination.k8s.io"]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]

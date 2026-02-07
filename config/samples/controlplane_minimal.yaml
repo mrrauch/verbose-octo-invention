@@ -1,0 +1,54 @@
+apiVersion: openstack.k8s.io/v1alpha1
+kind: OpenStackControlPlane
+metadata:
+  name: my-cloud
+  namespace: openstack
+spec:
+  region: RegionOne
+  storageBackend: pvc
+  networkBackend: ovn
+
+  mariadb:
+    replicas: 1
+    storage:
+      size: 20Gi
+
+  rabbitmq:
+    replicas: 1
+    storage:
+      size: 10Gi
+
+  memcached:
+    replicas: 1
+
+  keystone:
+    replicas: 1
+
+  glance:
+    replicas: 1
+    storageType: pvc
+    storage:
+      size: 50Gi
+
+  placement:
+    replicas: 1
+
+  neutron:
+    replicas: 1
+    mechanism: ovn
+
+  nova:
+    replicas: 1
+    virtType: qemu
+    computeReplicas: 1
+
+  # Cinder disabled in minimal deployment
+  # cinder:
+  #   replicas: 1
+  #   backends:
+  #     - name: lvm-default
+  #       type: lvm
+
+  horizon:
+    replicas: 1
+    hostname: horizon.example.com

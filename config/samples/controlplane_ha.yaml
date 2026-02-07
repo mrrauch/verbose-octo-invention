@@ -1,0 +1,96 @@
+apiVersion: openstack.k8s.io/v1alpha1
+kind: OpenStackControlPlane
+metadata:
+  name: production-cloud
+  namespace: openstack
+spec:
+  region: RegionOne
+  storageBackend: ceph
+  networkBackend: ovn
+  tls:
+    enabled: true
+    issuerRef:
+      name: openstack-ca
+      kind: ClusterIssuer
+
+  mariadb:
+    replicas: 3
+    galeraEnabled: true
+    storage:
+      size: 100Gi
+      storageClassName: fast-ssd
+
+  rabbitmq:
+    replicas: 3
+    clusterEnabled: true
+    storage:
+      size: 20Gi
+      storageClassName: fast-ssd
+
+  memcached:
+    replicas: 3
+
+  keystone:
+    replicas: 3
+    fernetKeyRotationInterval: 12
+
+  glance:
+    replicas: 3
+    storageType: ceph
+    cephPoolName: glance-images
+
+  placement:
+    replicas: 3
+
+  neutron:
+    replicas: 3
+    mechanism: ovn
+    tunnelType: geneve
+
+  nova:
+    replicas: 3
+    virtType: kvm
+    computeReplicas: 0          # Compute runs on external data-plane nodes
+    ephemeralStorage: ceph
+
+  cinder:
+    replicas: 3
+    backends:
+      - name: ceph-rbd
+        type: ceph
+        cephPoolName: cinder-volumes
+    defaultBackend: ceph-rbd
+
+  heat:
+    replicas: 2
+    engineReplicas: 3
+
+  horizon:
+    replicas: 2
+    hostname: dashboard.cloud.example.com
+
+  cephStorage:
+    mode: rook
+    rook:
+      namespace: rook-ceph
+      monCount: 3
+      osdCount: 9
+      storageDeviceFilter: "^sd[b-z]"
+    pools:
+      - name: cinder-volumes
+        replicaCount: 3
+        purpose: cinder-volumes
+      - name: glance-images
+        replicaCount: 3
+        purpose: glance-images
+      - name: nova-ephemeral
+        replicaCount: 3
+        purpose: nova-ephemeral
+
+  ovnNetwork:
+    northboundDBReplicas: 3
+    southboundDBReplicas: 3
+    northdReplicas: 1
+    enableRaftClustering: true
+    dbStorage:
+      size: 10Gi

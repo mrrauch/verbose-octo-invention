@@ -1,0 +1,97 @@
+domain: k8s.io
+layout:
+- go.kubebuilder.io/v4
+projectName: openstack-operator
+repo: github.com/mrrauch/openstack-operator
+version: "3"
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: OpenStackControlPlane
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: MariaDB
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: RabbitMQ
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Memcached
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Keystone
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Glance
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Placement
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Neutron
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Nova
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Cinder
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Heat
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Horizon
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: CephStorage
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: OVNNetwork
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: OpenStackDataPlane
+  version: v1alpha1

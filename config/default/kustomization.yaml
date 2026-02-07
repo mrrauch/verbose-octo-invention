@@ -1,0 +1,9 @@
+namespace: openstack-operator-system
+
+namePrefix: openstack-operator-
+
+resources:
+  - ../manager/
+  - ../rbac/
+
+patches: []
