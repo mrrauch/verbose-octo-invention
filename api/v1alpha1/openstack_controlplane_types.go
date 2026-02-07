@@ -37,8 +37,8 @@ type OpenStackControlPlaneSpec struct {
 	// +optional
 	PublicDomain string `json:"publicDomain,omitempty"`
 
-	// MariaDB defines the MariaDB deployment spec.
-	MariaDB MariaDBSpec `json:"mariadb,omitempty"`
+	// Database defines the Database deployment spec.
+	Database DatabaseSpec `json:"database,omitempty"`
 
 	// RabbitMQ defines the RabbitMQ deployment spec.
 	RabbitMQ RabbitMQServiceSpec `json:"rabbitmq,omitempty"`
