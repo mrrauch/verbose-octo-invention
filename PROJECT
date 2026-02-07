@@ -95,3 +95,157 @@ resources:
   group: openstack
   kind: OpenStackDataPlane
   version: v1alpha1
+# Extended Services — Tier 1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Swift
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Barbican
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Octavia
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Designate
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Manila
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Ironic
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Magnum
+  version: v1alpha1
+# Extended Services — Tier 2
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Trove
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Ceilometer
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Aodh
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Masakari
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Mistral
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Tacker
+  version: v1alpha1
+# Extended Services — Tier 3
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Cyborg
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Blazar
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Zun
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: CloudKitty
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Watcher
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Vitrage
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Zaqar
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Freezer
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Venus
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Adjutant
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Storlets
+  version: v1alpha1
+# Dashboards
+- api:
+    crdVersion: v1
+    namespaced: true
+  group: openstack
+  kind: Skyline
+  version: v1alpha1

@@ -59,9 +59,136 @@ type OpenStackControlPlaneSpec struct {
 	// +optional
 	Heat *HeatSpec `json:"heat,omitempty"`
 
-	// Horizon defines the Horizon (Dashboard) deployment spec.
+	// --- Extended Services: Tier 1 (Commonly Deployed) ---
+
+	// Swift defines the Swift (Object Storage) deployment spec.
+	// +optional
+	Swift *SwiftSpec `json:"swift,omitempty"`
+
+	// Barbican defines the Barbican (Key Manager) deployment spec.
+	// +optional
+	Barbican *BarbicanSpec `json:"barbican,omitempty"`
+
+	// Octavia defines the Octavia (Load Balancer) deployment spec.
+	// Requires: Nova, Neutron, Glance. Optional: Barbican.
+	// +optional
+	Octavia *OctaviaSpec `json:"octavia,omitempty"`
+
+	// Designate defines the Designate (DNS) deployment spec.
+	// Requires: Neutron.
+	// +optional
+	Designate *DesignateSpec `json:"designate,omitempty"`
+
+	// Manila defines the Manila (Shared Filesystems) deployment spec.
+	// Requires: Neutron.
+	// +optional
+	Manila *ManilaSpec `json:"manila,omitempty"`
+
+	// Ironic defines the Ironic (Bare Metal) deployment spec.
+	// Requires: Glance, Neutron.
+	// +optional
+	Ironic *IronicSpec `json:"ironic,omitempty"`
+
+	// Magnum defines the Magnum (Container Infrastructure) deployment spec.
+	// Requires: Nova, Neutron, Glance, Heat.
+	// +optional
+	Magnum *MagnumSpec `json:"magnum,omitempty"`
+
+	// --- Extended Services: Tier 2 (Moderately Deployed) ---
+
+	// Trove defines the Trove (Database as a Service) deployment spec.
+	// Requires: Nova, Neutron, Cinder, Glance, Swift.
+	// +optional
+	Trove *TroveSpec `json:"trove,omitempty"`
+
+	// Ceilometer defines the Ceilometer (Telemetry) deployment spec.
+	// +optional
+	Ceilometer *CeilometerSpec `json:"ceilometer,omitempty"`
+
+	// Aodh defines the Aodh (Alarming) deployment spec.
+	// Requires: Ceilometer.
+	// +optional
+	Aodh *AodhSpec `json:"aodh,omitempty"`
+
+	// Masakari defines the Masakari (Instance HA) deployment spec.
+	// Requires: Nova.
+	// +optional
+	Masakari *MasakariSpec `json:"masakari,omitempty"`
+
+	// Mistral defines the Mistral (Workflow) deployment spec.
+	// +optional
+	Mistral *MistralSpec `json:"mistral,omitempty"`
+
+	// Tacker defines the Tacker (NFV Orchestration) deployment spec.
+	// Requires: Nova, Neutron, Glance, Heat.
+	// +optional
+	Tacker *TackerSpec `json:"tacker,omitempty"`
+
+	// --- Extended Services: Tier 3 (Niche / Specialized) ---
+
+	// Cyborg defines the Cyborg (Accelerator Management) deployment spec.
+	// Requires: Nova, Placement.
+	// +optional
+	Cyborg *CyborgSpec `json:"cyborg,omitempty"`
+
+	// Blazar defines the Blazar (Resource Reservation) deployment spec.
+	// Requires: Nova.
+	// +optional
+	Blazar *BlazarSpec `json:"blazar,omitempty"`
+
+	// Zun defines the Zun (Container) deployment spec.
+	// Requires: Neutron.
+	// +optional
+	Zun *ZunSpec `json:"zun,omitempty"`
+
+	// CloudKitty defines the CloudKitty (Rating/Billing) deployment spec.
+	// Requires: Ceilometer or Prometheus.
+	// +optional
+	CloudKitty *CloudKittySpec `json:"cloudKitty,omitempty"`
+
+	// Watcher defines the Watcher (Resource Optimization) deployment spec.
+	// Requires: Nova, Ceilometer.
+	// +optional
+	Watcher *WatcherSpec `json:"watcher,omitempty"`
+
+	// Vitrage defines the Vitrage (Root Cause Analysis) deployment spec.
+	// Requires: Ceilometer, Aodh.
+	// +optional
+	Vitrage *VitrageSpec `json:"vitrage,omitempty"`
+
+	// Zaqar defines the Zaqar (Messaging) deployment spec.
+	// +optional
+	Zaqar *ZaqarSpec `json:"zaqar,omitempty"`
+
+	// Freezer defines the Freezer (Backup/Restore) deployment spec.
+	// Requires: Swift.
+	// +optional
+	Freezer *FreezerSpec `json:"freezer,omitempty"`
+
+	// Venus defines the Venus (Log Management) deployment spec.
+	// +optional
+	Venus *VenusSpec `json:"venus,omitempty"`
+
+	// Adjutant defines the Adjutant (Ops Automation) deployment spec.
+	// +optional
+	Adjutant *AdjutantSpec `json:"adjutant,omitempty"`
+
+	// Storlets defines the Storlets (Compute in Object Storage) deployment spec.
+	// Requires: Swift.
+	// +optional
+	Storlets *StorletsSpec `json:"storlets,omitempty"`
+
+	// --- Dashboards ---
+
+	// Horizon defines the Horizon (Classic Dashboard) deployment spec.
 	// +optional
 	Horizon *HorizonSpec `json:"horizon,omitempty"`
+
+	// Skyline defines the Skyline (Modern Dashboard) deployment spec.
+	// +optional
+	Skyline *SkylineSpec `json:"skyline,omitempty"`
+
+	// --- Infrastructure Backends ---
 
 	// CephStorage defines the Ceph storage backend configuration.
 	// Required when storageBackend is "ceph".
@@ -75,7 +202,7 @@ type OpenStackControlPlaneSpec struct {
 }
 
 // ControlPlanePhase represents the current phase of the deployment.
-// +kubebuilder:validation:Enum=Pending;Infrastructure;Identity;CoreServices;Compute;OptionalServices;Ready;Failed
+// +kubebuilder:validation:Enum=Pending;Infrastructure;Identity;CoreServices;Compute;ExtendedServices;Dashboards;Ready;Failed
 type ControlPlanePhase string
 
 const (
@@ -84,7 +211,8 @@ const (
 	ControlPlanePhaseIdentity           ControlPlanePhase = "Identity"
 	ControlPlanePhaseCoreServices       ControlPlanePhase = "CoreServices"
 	ControlPlanePhaseCompute            ControlPlanePhase = "Compute"
-	ControlPlanePhaseOptionalServices   ControlPlanePhase = "OptionalServices"
+	ControlPlanePhaseExtendedServices   ControlPlanePhase = "ExtendedServices"
+	ControlPlanePhaseDashboards         ControlPlanePhase = "Dashboards"
 	ControlPlanePhaseReady              ControlPlanePhase = "Ready"
 	ControlPlanePhaseFailed             ControlPlanePhase = "Failed"
 )
