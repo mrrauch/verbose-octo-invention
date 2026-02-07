@@ -8,8 +8,9 @@ spec:
   storageBackend: pvc
   networkBackend: ovn
 
-  mariadb:
+  database:
     replicas: 1
+    engine: postgresql
     storage:
       size: 20Gi
 

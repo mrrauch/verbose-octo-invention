@@ -13,9 +13,10 @@ spec:
       name: openstack-ca
       kind: ClusterIssuer
 
-  mariadb:
+  database:
     replicas: 3
-    galeraEnabled: true
+    engine: postgresql
+    haEnabled: true
     storage:
       size: 100Gi
       storageClassName: fast-ssd
