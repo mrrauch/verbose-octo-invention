@@ -6,7 +6,120 @@
 
 **Architecture:** Each service gets its own controller following the standard Kubebuilder reconciler pattern (fetch CR, handle finalizer, ensure resources, update status). Shared logic lives in `internal/common/` (condition helpers, secret generation, database provisioning, config rendering). The top-level `OpenStackControlPlane` controller creates child CRs in dependency order and waits for each phase to become Ready before advancing.
 
-**Tech Stack:** Go 1.22, Kubebuilder v4, controller-runtime v0.18.4, envtest for controller tests, Kolla container images
+**Tech Stack:** Go 1.22, Kubebuilder v4, controller-runtime v0.18.4, envtest for controller tests, Kolla container images, Kubernetes Gateway API v1.4.x
+
+---
+
+## Cluster Prerequisites
+
+The base Kubernetes cluster **must** have the following installed before deploying the operator. The operator does NOT install these — they are infrastructure-level concerns owned by the cluster admin.
+
+### Required
+
+| Component | Purpose | Minimum Version | Notes |
+|-----------|---------|-----------------|-------|
+| **Kubernetes** | Control plane | v1.28+ | Required for Gateway API v1.4 and controller-runtime v0.18 |
+| **StorageClass (RWO)** | PVCs for MariaDB, RabbitMQ, OVN databases, Glance images | Any CSI driver | Must be set as default or explicitly named in CR specs. Any CSI-backed StorageClass that supports `ReadWriteOnce` works (e.g., `local-path`, `longhorn`, `ceph-rbd`, `ebs-csi`, `pd-csi`). |
+| **Gateway API CRDs** | Service exposure via HTTPRoute | v1.4.x | Install via `kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.1/standard-install.yaml` |
+| **Gateway API implementation** | Data plane for HTTPRoute | Any conformant | See "Supported Implementations" below |
+| **Gateway resource** | Listener for OpenStack API traffic | — | A `Gateway` resource in the `openstack` namespace (or cross-namespace via `ReferenceGrant`). The operator creates `HTTPRoute` resources that attach to it. |
+| **cert-manager** (if TLS enabled) | Automated certificate provisioning | v1.14+ | Required when `spec.tls.enabled=true`. Operator references an `Issuer` or `ClusterIssuer` via `spec.tls.issuerRef`. |
+
+### Storage Details
+
+**What the operator creates:**
+- MariaDB: 1x PVC (default 10Gi RWO) via StatefulSet VolumeClaimTemplate
+- RabbitMQ: 1x PVC (default 10Gi RWO) via StatefulSet VolumeClaimTemplate
+- OVN NB DB: 1x PVC (default 1Gi RWO)
+- OVN SB DB: 1x PVC (default 1Gi RWO)
+- Glance (PVC backend): 1x PVC (default 10Gi RWO) — only when `storageType=pvc`
+
+**StorageClass requirements:**
+- All Phase 1 PVCs use `ReadWriteOnce` access mode — no shared storage needed
+- If no `storageClassName` is specified in the CR, the cluster's **default StorageClass** is used
+- For production: use a CSI driver with volume expansion support (`allowVolumeExpansion: true`)
+- For dev/test: `local-path-provisioner` or `hostpath` is sufficient
+
+**Validation command:**
+```bash
+# Verify a default StorageClass exists
+kubectl get storageclass -o jsonpath='{range .items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")]}{.metadata.name}{"\n"}{end}'
+```
+
+### Networking Details
+
+**What the cluster needs:**
+- Standard Kubernetes networking (pod-to-pod, pod-to-service DNS)
+- A Gateway API implementation for external API access
+- No special CNI requirements for Phase 1 (OVN for OpenStack VMs runs as its own overlay, independent of the cluster CNI)
+
+**Gateway API — supported implementations** (any conformant implementation works):
+
+| Implementation | Notes |
+|----------------|-------|
+| **Envoy Gateway** | CNCF project, first-class Gateway API support, recommended for new clusters |
+| **Istio** | Full mesh + gateway, ambient mode eliminates sidecars |
+| **Cilium** | eBPF-native, best performance if already your CNI |
+| **NGINX Gateway Fabric** | Successor to nginx-ingress (EOL March 2026), production-ready |
+| **Contour** | Envoy-based, lightweight |
+| **Traefik v3** | Multi-protocol, proven stability |
+| **HAProxy Kubernetes Gateway** | High-performance, low-latency |
+
+**Operator creates these Gateway API resources:**
+- One `HTTPRoute` per public OpenStack API (Keystone, Glance, Nova, Neutron, Placement)
+- Routes attach to a pre-existing `Gateway` named in `spec.gatewayRef` (or default `openstack-gateway` in same namespace)
+- TLS termination is handled by the Gateway listener (via cert-manager), not by the operator
+
+**Minimal Gateway setup example:**
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: openstack-gateway
+  namespace: openstack
+spec:
+  gatewayClassName: eg  # or istio, cilium, nginx, etc.
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: openstack-tls
+      allowedRoutes:
+        namespaces:
+          from: Same
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
+```
+
+### Quick-Start Checklist
+
+```bash
+# 1. Verify Kubernetes version
+kubectl version --short
+
+# 2. Verify default StorageClass
+kubectl get sc
+
+# 3. Install Gateway API CRDs (if not present)
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.1/standard-install.yaml
+
+# 4. Install a Gateway API implementation (example: Envoy Gateway)
+helm install eg oci://docker.io/envoyproxy/gateway-helm --version v1.3.0 -n envoy-gateway-system --create-namespace
+
+# 5. Create the openstack namespace + Gateway
+kubectl create namespace openstack
+kubectl apply -f config/samples/gateway.yaml
+
+# 6. (Optional) Install cert-manager for TLS
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.0/cert-manager.yaml
+```
 
 ---
 
@@ -15,7 +128,7 @@
 Tasks MUST be implemented in this order because later tasks depend on earlier ones:
 
 ```
-Task 1:  Code generation (deepcopy, CRDs)
+Task 1:  Code generation (deepcopy, CRDs) + add Gateway API dependency
 Task 2:  internal/common/conditions.go — used by ALL controllers
 Task 3:  internal/common/secret.go — used by ALL controllers
 Task 4:  internal/common/finalizer.go — used by ALL controllers
@@ -25,15 +138,17 @@ Task 7:  RabbitMQ controller — follows MariaDB pattern
 Task 8:  Memcached controller — simplest infra controller
 Task 9:  internal/common/database.go — DB provisioning helpers (used by Keystone+)
 Task 10: internal/common/endpoint.go — Keystone endpoint helpers (used by Glance+)
-Task 11: Keystone controller — first service controller, needs DB + bootstrap
-Task 12: Glance controller — needs DB + Keystone endpoint
-Task 13: Placement controller — needs DB + Keystone endpoint
-Task 14: OVN Network controller — networking infra
-Task 15: Neutron controller — needs DB + Keystone + OVN
-Task 16: Nova controller — most complex: api, scheduler, conductor, compute
-Task 17: OpenStackControlPlane controller — orchestrates all of the above
-Task 18: Wire all controllers in main.go
-Task 19: Build validation
+Task 11: internal/common/httproute.go — Gateway API HTTPRoute helpers (used by Keystone+)
+Task 12: config/samples/gateway.yaml — sample Gateway resource for cluster setup
+Task 13: Keystone controller — first service controller, needs DB + bootstrap + HTTPRoute
+Task 14: Glance controller — needs DB + Keystone endpoint + HTTPRoute
+Task 15: Placement controller — needs DB + Keystone endpoint + HTTPRoute
+Task 16: OVN Network controller — networking infra (no HTTPRoute, internal only)
+Task 17: Neutron controller — needs DB + Keystone + OVN + HTTPRoute
+Task 18: Nova controller — most complex: api, scheduler, conductor, compute + HTTPRoute
+Task 19: OpenStackControlPlane controller — orchestrates all of the above
+Task 20: Wire all controllers in main.go
+Task 21: Build + E2E acceptance validation
 ```
 
 ---
@@ -44,10 +159,11 @@ Task 19: Build validation
 - Generated: `api/v1alpha1/zz_generated.deepcopy.go`
 - Generated: `config/crd/bases/*.yaml`
 
-**Step 1: Install dependencies**
+**Step 1: Add Gateway API dependency and install dependencies**
 
 ```bash
 cd /home/mrrauch/git/go/src/verbose-octo-invention
+go get sigs.k8s.io/gateway-api@v1.4.1
 go mod tidy
 ```
 
@@ -96,7 +212,7 @@ import (
 
 func TestSetCondition_AddsNew(t *testing.T) {
 	var conditions []metav1.Condition
-	conditions = SetCondition(conditions, "Ready", metav1.ConditionTrue, "AllGood", "everything is fine")
+	conditions = SetCondition(conditions, "Ready", metav1.ConditionTrue, "AllGood", "everything is fine", 1)
 	if len(conditions) != 1 {
 		t.Fatalf("expected 1 condition, got %d", len(conditions))
 	}
@@ -106,13 +222,16 @@ func TestSetCondition_AddsNew(t *testing.T) {
 	if conditions[0].Status != metav1.ConditionTrue {
 		t.Errorf("expected status True, got %s", conditions[0].Status)
 	}
+	if conditions[0].ObservedGeneration != 1 {
+		t.Errorf("expected observedGeneration 1, got %d", conditions[0].ObservedGeneration)
+	}
 }
 
 func TestSetCondition_UpdatesExisting(t *testing.T) {
 	conditions := []metav1.Condition{
 		{Type: "Ready", Status: metav1.ConditionFalse, Reason: "Waiting", Message: "not yet"},
 	}
-	conditions = SetCondition(conditions, "Ready", metav1.ConditionTrue, "AllGood", "done")
+	conditions = SetCondition(conditions, "Ready", metav1.ConditionTrue, "AllGood", "done", 2)
 	if len(conditions) != 1 {
 		t.Fatalf("expected 1 condition, got %d", len(conditions))
 	}
@@ -121,6 +240,9 @@ func TestSetCondition_UpdatesExisting(t *testing.T) {
 	}
 	if conditions[0].Reason != "AllGood" {
 		t.Errorf("expected reason AllGood, got %s", conditions[0].Reason)
+	}
+	if conditions[0].ObservedGeneration != 2 {
+		t.Errorf("expected observedGeneration 2, got %d", conditions[0].ObservedGeneration)
 	}
 }
 
@@ -159,7 +281,7 @@ import (
 
 // SetCondition sets or updates a condition in the given slice.
 // Returns the updated slice.
-func SetCondition(conditions []metav1.Condition, condType string, status metav1.ConditionStatus, reason, message string) []metav1.Condition {
+func SetCondition(conditions []metav1.Condition, condType string, status metav1.ConditionStatus, reason, message string, observedGeneration int64) []metav1.Condition {
 	now := metav1.NewTime(time.Now())
 	for i, c := range conditions {
 		if c.Type == condType {
@@ -169,7 +291,7 @@ func SetCondition(conditions []metav1.Condition, condType string, status metav1.
 			conditions[i].Status = status
 			conditions[i].Reason = reason
 			conditions[i].Message = message
-			conditions[i].ObservedGeneration = c.ObservedGeneration
+			conditions[i].ObservedGeneration = observedGeneration
 			return conditions
 		}
 	}
@@ -178,6 +300,7 @@ func SetCondition(conditions []metav1.Condition, condType string, status metav1.
 		Status:             status,
 		Reason:             reason,
 		Message:            message,
+		ObservedGeneration: observedGeneration,
 		LastTransitionTime: now,
 	})
 }
@@ -299,14 +422,16 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	openstackv1alpha1 "github.com/mrrauch/openstack-operator/api/v1alpha1"
 )
 
-// SetupScheme returns a runtime.Scheme with core K8s and OpenStack types registered.
+// SetupScheme returns a runtime.Scheme with core K8s, Gateway API, and OpenStack types registered.
 func SetupScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(s))
+	utilruntime.Must(gatewayv1.Install(s))
 	utilruntime.Must(openstackv1alpha1.AddToScheme(s))
 	return s
 }
@@ -412,7 +537,6 @@ package common
 import (
 	"testing"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
@@ -467,14 +591,9 @@ Expected: FAIL
 // internal/common/finalizer.go
 package common
 
-import (
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-)
-
 const FinalizerName = "openstack.k8s.io/cleanup"
 
-// objectWithFinalizers is any object that has Get/SetFinalizers (all metav1.Object satisfy this).
+// objectWithFinalizers is any object that has Get/SetFinalizers.
 type objectWithFinalizers interface {
 	GetFinalizers() []string
 	SetFinalizers([]string)
@@ -602,7 +721,6 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -741,7 +859,7 @@ func (r *MariaDBReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	// Set status to Progressing
 	instance.Status.Conditions = common.SetCondition(
-		instance.Status.Conditions, "Ready", metav1.ConditionFalse, "Reconciling", "Reconciliation in progress",
+		instance.Status.Conditions, "Ready", metav1.ConditionFalse, "Reconciling", "Reconciliation in progress", instance.Generation,
 	)
 
 	// Ensure root password secret
@@ -768,7 +886,7 @@ func (r *MariaDBReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	if sts.Status.ReadyReplicas == sts.Status.Replicas && sts.Status.ReadyReplicas > 0 {
 		instance.Status.Conditions = common.SetCondition(
-			instance.Status.Conditions, "Ready", metav1.ConditionTrue, "StatefulSetReady", "MariaDB is ready",
+			instance.Status.Conditions, "Ready", metav1.ConditionTrue, "StatefulSetReady", "MariaDB is ready", instance.Generation,
 		)
 	}
 
@@ -1093,6 +1211,21 @@ func TestEnsureDBSync_CreatesJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected db-sync Job to be created: %v", err)
 	}
+	if len(job.Spec.Template.Spec.Containers) != 1 {
+		t.Fatalf("expected one container, got %d", len(job.Spec.Template.Spec.Containers))
+	}
+	var found bool
+	for _, env := range job.Spec.Template.Spec.Containers[0].Env {
+		if env.Name == "DB_PASSWORD" && env.ValueFrom != nil && env.ValueFrom.SecretKeyRef != nil {
+			if env.ValueFrom.SecretKeyRef.Name == "keystone-db-password" && env.ValueFrom.SecretKeyRef.Key == "password" {
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected DB_PASSWORD env var sourced from keystone-db-password secret")
+	}
 }
 ```
 
@@ -1206,7 +1339,7 @@ type DBSyncParams struct {
 	Namespace  string
 	Image      string
 	Command    []string
-	SecretName string
+	SecretName string // Secret containing the service DB password (key: "password")
 }
 
 // EnsureDBSync creates a Job that runs the service's db_sync command.
@@ -1238,6 +1371,17 @@ func EnsureDBSync(ctx context.Context, c client.Client, params DBSyncParams, own
 							Name:    "db-sync",
 							Image:   params.Image,
 							Command: params.Command,
+							Env: []corev1.EnvVar{
+								{
+									Name: "DB_PASSWORD",
+									ValueFrom: &corev1.EnvVarSource{
+										SecretKeyRef: &corev1.SecretKeySelector{
+											LocalObjectReference: corev1.LocalObjectReference{Name: params.SecretName},
+											Key:                  "password",
+										},
+									},
+								},
+							},
 						},
 					},
 				},
@@ -1269,12 +1413,11 @@ func IsJobComplete(ctx context.Context, c client.Client, name, namespace string)
 }
 ```
 
-Note: `SetupScheme()` in `scheme.go` must also register `batchv1` types. Update it:
+Note: `SetupScheme()` in `scheme.go` must also register `batchv1` types. Update it to add:
 
 ```go
-// Update internal/common/scheme.go to add:
 import batchv1 "k8s.io/api/batch/v1"
-// and in SetupScheme:
+// and in SetupScheme, before the Gateway API line:
 utilruntime.Must(batchv1.AddToScheme(s))
 ```
 
@@ -1474,9 +1617,277 @@ git commit -m "feat: add Keystone endpoint registration helper"
 
 ---
 
-### Task 11: Keystone controller
+### Task 11: HTTPRoute helpers — `internal/common/httproute.go`
 
-First service controller. Needs database, db_sync, deployment, service, bootstrap (admin user, admin project, service endpoints).
+Helpers for creating Gateway API HTTPRoute resources to expose OpenStack API endpoints externally.
+
+**Files:**
+- Create: `internal/common/httproute.go`
+- Test: `internal/common/httproute_test.go`
+
+**Step 1: Write the failing test**
+
+```go
+// internal/common/httproute_test.go
+package common
+
+import (
+	"context"
+	"testing"
+
+	"k8s.io/apimachinery/pkg/types"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+)
+
+func TestEnsureHTTPRoute_CreatesRoute(t *testing.T) {
+	scheme := SetupScheme()
+	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	params := HTTPRouteParams{
+		Name:        "keystone-api",
+		Namespace:   "openstack",
+		Hostname:    "keystone.example.com",
+		ServiceName: "keystone-api",
+		ServicePort: 5000,
+		GatewayName: "openstack-gateway",
+	}
+
+	err := EnsureHTTPRoute(context.Background(), client, params, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	route := &gatewayv1.HTTPRoute{}
+	err = client.Get(context.Background(), types.NamespacedName{
+		Name:      "keystone-api",
+		Namespace: "openstack",
+	}, route)
+	if err != nil {
+		t.Fatalf("expected HTTPRoute to be created: %v", err)
+	}
+
+	if len(route.Spec.Hostnames) != 1 || string(route.Spec.Hostnames[0]) != "keystone.example.com" {
+		t.Errorf("expected hostname keystone.example.com, got %v", route.Spec.Hostnames)
+	}
+
+	if len(route.Spec.ParentRefs) != 1 || string(route.Spec.ParentRefs[0].Name) != "openstack-gateway" {
+		t.Errorf("expected parentRef openstack-gateway, got %v", route.Spec.ParentRefs)
+	}
+
+	rules := route.Spec.Rules
+	if len(rules) != 1 || len(rules[0].BackendRefs) != 1 {
+		t.Fatalf("expected 1 rule with 1 backendRef, got %d rules", len(rules))
+	}
+	ref := rules[0].BackendRefs[0]
+	if string(ref.Name) != "keystone-api" {
+		t.Errorf("expected backend keystone-api, got %s", ref.Name)
+	}
+	if *ref.Port != 5000 {
+		t.Errorf("expected port 5000, got %d", *ref.Port)
+	}
+}
+
+func TestEnsureHTTPRoute_NoOpWhenExists(t *testing.T) {
+	scheme := SetupScheme()
+	existing := &gatewayv1.HTTPRoute{}
+	existing.Name = "keystone-api"
+	existing.Namespace = "openstack"
+
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
+
+	params := HTTPRouteParams{
+		Name:        "keystone-api",
+		Namespace:   "openstack",
+		Hostname:    "keystone.example.com",
+		ServiceName: "keystone-api",
+		ServicePort: 5000,
+		GatewayName: "openstack-gateway",
+	}
+
+	err := EnsureHTTPRoute(context.Background(), client, params, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+```
+
+**Step 2: Run test to verify it fails**
+
+```bash
+go test ./internal/common/ -v -run TestEnsureHTTPRoute
+```
+
+Expected: FAIL — `EnsureHTTPRoute` not defined.
+
+**Step 3: Write minimal implementation**
+
+```go
+// internal/common/httproute.go
+package common
+
+import (
+	"context"
+
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+)
+
+// HTTPRouteParams holds parameters for creating a Gateway API HTTPRoute.
+type HTTPRouteParams struct {
+	Name        string // HTTPRoute resource name
+	Namespace   string
+	Hostname    string // External hostname (e.g., "keystone.example.com")
+	ServiceName string // Backend Kubernetes Service name
+	ServicePort int32  // Backend Service port
+	GatewayName string // Name of the Gateway to attach to (default: "openstack-gateway")
+}
+
+// EnsureHTTPRoute creates an HTTPRoute that routes external traffic to an OpenStack service.
+// Skips creation if the route already exists.
+func EnsureHTTPRoute(ctx context.Context, c client.Client, params HTTPRouteParams, owner metav1.Object) error {
+	existing := &gatewayv1.HTTPRoute{}
+	err := c.Get(ctx, types.NamespacedName{Name: params.Name, Namespace: params.Namespace}, existing)
+	if err == nil {
+		return nil
+	}
+	if !errors.IsNotFound(err) {
+		return err
+	}
+
+	gatewayName := params.GatewayName
+	if gatewayName == "" {
+		gatewayName = "openstack-gateway"
+	}
+
+	port := gatewayv1.PortNumber(params.ServicePort)
+	route := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      params.Name,
+			Namespace: params.Namespace,
+			Labels: map[string]string{
+				"app.kubernetes.io/managed-by": "openstack-operator",
+			},
+		},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{
+					{
+						Name: gatewayv1.ObjectName(gatewayName),
+					},
+				},
+			},
+			Hostnames: []gatewayv1.Hostname{
+				gatewayv1.Hostname(params.Hostname),
+			},
+			Rules: []gatewayv1.HTTPRouteRule{
+				{
+					BackendRefs: []gatewayv1.HTTPBackendRef{
+						{
+							BackendRef: gatewayv1.BackendRef{
+								BackendObjectReference: gatewayv1.BackendObjectReference{
+									Name: gatewayv1.ObjectName(params.ServiceName),
+									Port: &port,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if owner != nil {
+		_ = controllerutil.SetOwnerReference(owner, route, c.Scheme())
+	}
+	return c.Create(ctx, route)
+}
+```
+
+**Step 4: Run test to verify it passes**
+
+```bash
+go test ./internal/common/ -v -run TestEnsureHTTPRoute
+```
+
+Expected: PASS
+
+**Step 5: Commit**
+
+```bash
+git add internal/common/httproute.go internal/common/httproute_test.go
+git commit -m "feat: add Gateway API HTTPRoute helper for service exposure"
+```
+
+---
+
+### Task 12: Gateway sample — `config/samples/gateway.yaml`
+
+A sample Gateway resource that cluster admins apply before deploying the operator.
+
+**Files:**
+- Create: `config/samples/gateway.yaml`
+
+**Step 1: Write the sample**
+
+```yaml
+# config/samples/gateway.yaml
+#
+# Sample Gateway for the OpenStack operator.
+# Apply this BEFORE creating an OpenStackControlPlane CR.
+# Adjust gatewayClassName to match your installed Gateway API implementation
+# (e.g., "eg" for Envoy Gateway, "istio" for Istio, "cilium" for Cilium).
+#
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: openstack-gateway
+  namespace: openstack
+spec:
+  gatewayClassName: eg  # Change to match your Gateway implementation
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: openstack-tls
+      allowedRoutes:
+        namespaces:
+          from: Same
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
+```
+
+**Step 2: Verify valid YAML**
+
+```bash
+python3 -c "import yaml; yaml.safe_load(open('config/samples/gateway.yaml'))"
+```
+
+Expected: No errors.
+
+**Step 3: Commit**
+
+```bash
+git add config/samples/gateway.yaml
+git commit -m "feat: add sample Gateway resource for cluster setup"
+```
+
+---
+
+### Task 13: Keystone controller
+
+First service controller. Needs database, db_sync, deployment, service, bootstrap (admin user, admin project, service endpoints), and HTTPRoute for external access.
 
 **Files:**
 - Create: `internal/controller/keystone_controller.go`
@@ -1493,6 +1904,7 @@ Tests should verify:
   - Deployment: `keystone-api`
   - Service: `keystone-api`
   - Job: `keystone-bootstrap`
+  - HTTPRoute: `keystone-api` (hostname from spec or default, attached to `openstack-gateway`)
 - Missing CR → no error, no requeue
 
 **Step 2: Run test to verify it fails**
@@ -1533,9 +1945,9 @@ git commit -m "feat: implement Keystone controller with DB, bootstrap, and endpo
 
 ---
 
-### Task 12: Glance controller
+### Task 14: Glance controller
 
-Image service. Needs database, db_sync, deployment, service, Keystone endpoint.
+Image service. Needs database, db_sync, deployment, service, Keystone endpoint, HTTPRoute.
 
 **Files:**
 - Create: `internal/controller/glance_controller.go`
@@ -1551,6 +1963,7 @@ Tests should verify:
   - Deployment: `glance-api`
   - Service: `glance-api` (port 9292)
   - Job: `glance-endpoint-create`
+  - HTTPRoute: `glance-api`
 
 **Step 2: Run test to verify it fails**
 
@@ -1566,6 +1979,7 @@ Same pattern as Keystone but:
 - DB name: `glance`
 - db_sync command: `glance-manage db_sync`
 - Endpoint registration: service type `image`, URLs with port 9292
+- HTTPRoute: hostname `glance.<domain>`, backend `glance-api:9292`
 - For PVC storage backend: mount a PVC at `/var/lib/glance/images/`
 - Status: `apiEndpoint = http://glance-api.<namespace>.svc:9292`
 
@@ -1580,9 +1994,9 @@ git commit -m "feat: implement Glance controller"
 
 ---
 
-### Task 13: Placement controller
+### Task 15: Placement controller
 
-Resource tracking API. Simple — just API server, DB, Keystone endpoint.
+Resource tracking API. Simple — API server, DB, Keystone endpoint, HTTPRoute.
 
 **Files:**
 - Create: `internal/controller/placement_controller.go`
@@ -1591,7 +2005,7 @@ Resource tracking API. Simple — just API server, DB, Keystone endpoint.
 **Step 1: Write the failing test**
 
 Same pattern. Expects:
-- Secret, db-create Job, db-sync Job, Deployment, Service (port 8778), endpoint-create Job
+- Secret, db-create Job, db-sync Job, Deployment, Service (port 8778), endpoint-create Job, HTTPRoute
 
 **Step 2: Run test to verify it fails**
 
@@ -1606,6 +2020,7 @@ go test ./internal/controller/ -v -run TestPlacementReconciler
 - DB name: `placement`
 - db_sync command: `placement-manage db sync`
 - Endpoint: service type `placement`
+- HTTPRoute: hostname `placement.<domain>`, backend `placement-api:8778`
 - Status: `apiEndpoint = http://placement-api.<namespace>.svc:8778`
 
 **Step 4: Run tests, verify pass**
@@ -1619,9 +2034,9 @@ git commit -m "feat: implement Placement controller"
 
 ---
 
-### Task 14: OVN Network controller
+### Task 16: OVN Network controller
 
-Deploys OVN infrastructure: Northbound DB, Southbound DB, ovn-northd.
+Deploys OVN infrastructure: Northbound DB, Southbound DB, ovn-northd. No HTTPRoute — OVN is internal-only.
 
 **Files:**
 - Create: `internal/controller/ovn_network_controller.go`
@@ -1663,9 +2078,9 @@ git commit -m "feat: implement OVN Network controller"
 
 ---
 
-### Task 15: Neutron controller
+### Task 17: Neutron controller
 
-Networking service. Needs DB, db_sync, Keystone endpoint, OVN connection config.
+Networking service. Needs DB, db_sync, Keystone endpoint, OVN connection config, HTTPRoute.
 
 **Files:**
 - Create: `internal/controller/neutron_controller.go`
@@ -1680,6 +2095,7 @@ Expects:
 - Deployment: `neutron-server`
 - Service: `neutron-server` (port 9696)
 - Job: `neutron-endpoint-create`
+- HTTPRoute: `neutron-server`
 
 **Step 2: Run test to verify it fails**
 
@@ -1694,6 +2110,7 @@ go test ./internal/controller/ -v -run TestNeutronReconciler
 - DB name: `neutron`
 - db_sync command: `neutron-db-manage upgrade heads`
 - Endpoint: service type `network`
+- HTTPRoute: hostname `neutron.<domain>`, backend `neutron-server:9696`
 - Env vars include OVN NB/SB connection strings
 - Status: `apiEndpoint = http://neutron-server.<namespace>.svc:9696`
 
@@ -1708,9 +2125,9 @@ git commit -m "feat: implement Neutron controller"
 
 ---
 
-### Task 16: Nova controller
+### Task 18: Nova controller
 
-Most complex controller. Multiple sub-components: API, scheduler, conductor, compute.
+Most complex controller. Multiple sub-components: API, scheduler, conductor, compute. HTTPRoute for nova-api.
 
 **Files:**
 - Create: `internal/controller/nova_controller.go`
@@ -1729,6 +2146,7 @@ Expects:
 - Deployment: `nova-compute` (replicas from `computeReplicas`)
 - Service: `nova-api` (port 8774)
 - Job: `nova-endpoint-create`
+- HTTPRoute: `nova-api`
 
 **Step 2: Run test to verify it fails**
 
@@ -1769,7 +2187,7 @@ git commit -m "feat: implement Nova controller with api, scheduler, conductor, c
 
 ---
 
-### Task 17: OpenStackControlPlane controller
+### Task 19: OpenStackControlPlane controller
 
 Top-level orchestrator. Creates child CRs in dependency order, waits for each phase.
 
@@ -1780,29 +2198,136 @@ Top-level orchestrator. Creates child CRs in dependency order, waits for each ph
 **Step 1: Write the failing test**
 
 ```go
-// Test: Creating an OpenStackControlPlane CR should produce child CRs
-// in the correct order based on phase.
+// internal/controller/controlplane_controller_test.go
+package controller
+
+import (
+	"context"
+	"testing"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	openstackv1alpha1 "github.com/mrrauch/openstack-operator/api/v1alpha1"
+	"github.com/mrrauch/openstack-operator/internal/common"
+)
+
+func ready(gen int64) []metav1.Condition {
+	return []metav1.Condition{{
+		Type:               "Ready",
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: gen,
+		LastTransitionTime: metav1.Now(),
+		Reason:             "Ready",
+	}}
+}
 
 func TestControlPlaneReconciler_CreatesInfrastructureCRs(t *testing.T) {
-	// Create OpenStackControlPlane CR
-	// Run reconcile
-	// Verify: MariaDB CR created, RabbitMQ CR created, Memcached CR created
-	// Verify: Phase is "Infrastructure"
+	scheme := common.SetupScheme()
+	cp := &openstackv1alpha1.OpenStackControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-cloud", Namespace: "openstack"},
+		Spec: openstackv1alpha1.OpenStackControlPlaneSpec{
+			NetworkBackend: "ovn",
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cp).WithStatusSubresource(cp).Build()
+	r := &ControlPlaneReconciler{Client: c, Scheme: scheme}
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "my-cloud", Namespace: "openstack"},
+	}); err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	for _, obj := range []struct {
+		name string
+		dst  client.Object
+	}{
+		{name: "my-cloud-mariadb", dst: &openstackv1alpha1.MariaDB{}},
+		{name: "my-cloud-rabbitmq", dst: &openstackv1alpha1.RabbitMQ{}},
+		{name: "my-cloud-memcached", dst: &openstackv1alpha1.Memcached{}},
+		{name: "my-cloud-ovn", dst: &openstackv1alpha1.OVNNetwork{}},
+	} {
+		if err := c.Get(context.Background(), types.NamespacedName{Name: obj.name, Namespace: "openstack"}, obj.dst); err != nil {
+			t.Fatalf("expected child CR %s: %v", obj.name, err)
+		}
+	}
+
+	fresh := &openstackv1alpha1.OpenStackControlPlane{}
+	_ = c.Get(context.Background(), types.NamespacedName{Name: "my-cloud", Namespace: "openstack"}, fresh)
+	if fresh.Status.Phase != openstackv1alpha1.ControlPlanePhaseInfrastructure {
+		t.Fatalf("expected phase Infrastructure, got %s", fresh.Status.Phase)
+	}
 }
 
 func TestControlPlaneReconciler_AdvancesToIdentity(t *testing.T) {
-	// Create OpenStackControlPlane CR
-	// Create MariaDB/RabbitMQ/Memcached CRs with Ready=True status
-	// Run reconcile
-	// Verify: Keystone CR created
-	// Verify: Phase is "Identity"
+	scheme := common.SetupScheme()
+	cp := &openstackv1alpha1.OpenStackControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-cloud", Namespace: "openstack"},
+		Spec: openstackv1alpha1.OpenStackControlPlaneSpec{NetworkBackend: "ovn"},
+		Status: openstackv1alpha1.OpenStackControlPlaneStatus{
+			Phase: openstackv1alpha1.ControlPlanePhaseInfrastructure,
+		},
+	}
+	mariadb := &openstackv1alpha1.MariaDB{ObjectMeta: metav1.ObjectMeta{Name: "my-cloud-mariadb", Namespace: "openstack"}, Status: openstackv1alpha1.MariaDBStatus{CommonStatus: openstackv1alpha1.CommonStatus{Conditions: ready(1)}}}
+	rabbit := &openstackv1alpha1.RabbitMQ{ObjectMeta: metav1.ObjectMeta{Name: "my-cloud-rabbitmq", Namespace: "openstack"}, Status: openstackv1alpha1.RabbitMQStatus{CommonStatus: openstackv1alpha1.CommonStatus{Conditions: ready(1)}}}
+	memcached := &openstackv1alpha1.Memcached{ObjectMeta: metav1.ObjectMeta{Name: "my-cloud-memcached", Namespace: "openstack"}, Status: openstackv1alpha1.MemcachedStatus{CommonStatus: openstackv1alpha1.CommonStatus{Conditions: ready(1)}}}
+	ovn := &openstackv1alpha1.OVNNetwork{ObjectMeta: metav1.ObjectMeta{Name: "my-cloud-ovn", Namespace: "openstack"}, Status: openstackv1alpha1.OVNNetworkStatus{CommonStatus: openstackv1alpha1.CommonStatus{Conditions: ready(1)}}}
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cp, mariadb, rabbit, memcached, ovn).
+		WithStatusSubresource(cp, mariadb, rabbit, memcached, ovn).
+		Build()
+	r := &ControlPlaneReconciler{Client: c, Scheme: scheme}
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "my-cloud", Namespace: "openstack"},
+	}); err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "my-cloud-keystone", Namespace: "openstack"}, &openstackv1alpha1.Keystone{}); err != nil {
+		t.Fatalf("expected Keystone CR to be created: %v", err)
+	}
+	fresh := &openstackv1alpha1.OpenStackControlPlane{}
+	_ = c.Get(context.Background(), types.NamespacedName{Name: "my-cloud", Namespace: "openstack"}, fresh)
+	if fresh.Status.Phase != openstackv1alpha1.ControlPlanePhaseIdentity {
+		t.Fatalf("expected phase Identity, got %s", fresh.Status.Phase)
+	}
 }
 
-func TestControlPlaneReconciler_AdvancesToCoreServices(t *testing.T) {
-	// All infra + Keystone ready
-	// Run reconcile
-	// Verify: Glance, Placement, Neutron, Nova CRs created
-	// Verify: Phase is "CoreServices"
+func TestControlPlaneReconciler_AdvancesToCompute(t *testing.T) {
+	scheme := common.SetupScheme()
+	cp := &openstackv1alpha1.OpenStackControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-cloud", Namespace: "openstack"},
+		Status: openstackv1alpha1.OpenStackControlPlaneStatus{
+			Phase: openstackv1alpha1.ControlPlanePhaseCoreServices,
+		},
+	}
+	glance := &openstackv1alpha1.Glance{ObjectMeta: metav1.ObjectMeta{Name: "my-cloud-glance", Namespace: "openstack"}, Status: openstackv1alpha1.GlanceStatus{CommonStatus: openstackv1alpha1.CommonStatus{Conditions: ready(1)}}}
+	placement := &openstackv1alpha1.Placement{ObjectMeta: metav1.ObjectMeta{Name: "my-cloud-placement", Namespace: "openstack"}, Status: openstackv1alpha1.PlacementStatus{CommonStatus: openstackv1alpha1.CommonStatus{Conditions: ready(1)}}}
+	neutron := &openstackv1alpha1.Neutron{ObjectMeta: metav1.ObjectMeta{Name: "my-cloud-neutron", Namespace: "openstack"}, Status: openstackv1alpha1.NeutronStatus{CommonStatus: openstackv1alpha1.CommonStatus{Conditions: ready(1)}}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cp, glance, placement, neutron).WithStatusSubresource(cp, glance, placement, neutron).Build()
+	r := &ControlPlaneReconciler{Client: c, Scheme: scheme}
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "my-cloud", Namespace: "openstack"},
+	}); err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "my-cloud-nova", Namespace: "openstack"}, &openstackv1alpha1.Nova{}); err != nil {
+		t.Fatalf("expected Nova CR to be created: %v", err)
+	}
+	fresh := &openstackv1alpha1.OpenStackControlPlane{}
+	_ = c.Get(context.Background(), types.NamespacedName{Name: "my-cloud", Namespace: "openstack"}, fresh)
+	if fresh.Status.Phase != openstackv1alpha1.ControlPlanePhaseCompute {
+		t.Fatalf("expected phase Compute, got %s", fresh.Status.Phase)
+	}
 }
 ```
 
@@ -1820,7 +2345,8 @@ Reconcile flow:
    - Ensure MariaDB CR (from `spec.mariadb`)
    - Ensure RabbitMQ CR (from `spec.rabbitmq`)
    - Ensure Memcached CR (from `spec.memcached`)
-   - If `spec.ovnNetwork != nil`: Ensure OVNNetwork CR
+   - If `spec.networkBackend == "ovn"`: ensure `OVNNetwork` CR
+   - If `spec.ovnNetwork == nil`, create the child OVN CR with zero-value spec so API defaults apply
    - Wait for all infra to be Ready → advance to Identity
 3. Phase: Identity
    - Ensure Keystone CR (from `spec.keystone`)
@@ -1829,9 +2355,11 @@ Reconcile flow:
    - Ensure Glance CR
    - Ensure Placement CR
    - Ensure Neutron CR
+   - Wait for all core service APIs to be Ready → advance to Compute
+5. Phase: Compute
    - Ensure Nova CR
-   - Wait for all core services Ready → advance to Ready
-5. Update phase + conditions
+   - Wait for Nova Ready → advance to Ready
+6. Update phase + conditions
 
 Key implementation detail: each child CR is created with:
 - `ownerReference` pointing to the control plane CR
@@ -1855,16 +2383,42 @@ func (r *ControlPlaneReconciler) ensureChildCR(ctx context.Context, owner *opens
 }
 ```
 
-Helper to check if a child CR is ready:
+Helper to check if a child CR is ready without reflection:
 
 ```go
-func (r *ControlPlaneReconciler) isChildReady(ctx context.Context, name, namespace string, obj client.Object) bool {
+func (r *ControlPlaneReconciler) isChildReady(ctx context.Context, name, namespace string, obj client.Object) (bool, error) {
 	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, obj); err != nil {
-		return false
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
 	}
-	// Check conditions via reflection or type-specific check
-	// All our types embed CommonStatus which has Conditions
-	return common.IsReady(extractConditions(obj))
+	return common.IsReady(getConditions(obj)), nil
+}
+
+func getConditions(obj client.Object) []metav1.Condition {
+	switch o := obj.(type) {
+	case *openstackv1alpha1.MariaDB:
+		return o.Status.Conditions
+	case *openstackv1alpha1.RabbitMQ:
+		return o.Status.Conditions
+	case *openstackv1alpha1.Memcached:
+		return o.Status.Conditions
+	case *openstackv1alpha1.OVNNetwork:
+		return o.Status.Conditions
+	case *openstackv1alpha1.Keystone:
+		return o.Status.Conditions
+	case *openstackv1alpha1.Glance:
+		return o.Status.Conditions
+	case *openstackv1alpha1.Placement:
+		return o.Status.Conditions
+	case *openstackv1alpha1.Neutron:
+		return o.Status.Conditions
+	case *openstackv1alpha1.Nova:
+		return o.Status.Conditions
+	default:
+		return nil
+	}
 }
 ```
 
@@ -1879,7 +2433,7 @@ git commit -m "feat: implement OpenStackControlPlane controller with phased depe
 
 ---
 
-### Task 18: Wire all controllers in main.go
+### Task 20: Wire all controllers in main.go
 
 **Files:**
 - Modify: `cmd/main.go`
@@ -1892,7 +2446,14 @@ Replace the TODO block in `cmd/main.go` with:
 import (
 	// ... existing imports ...
 	"github.com/mrrauch/openstack-operator/internal/controller"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
+
+// In init(), add Gateway API scheme registration:
+func init() {
+	// ... existing scheme registrations ...
+	utilruntime.Must(gatewayv1.Install(scheme))
+}
 
 // In main(), replace the TODO comment block with:
 
@@ -1936,7 +2497,7 @@ git commit -m "feat: register all Phase 1 controllers in main.go"
 
 ---
 
-### Task 19: Build validation and full test suite
+### Task 21: Build validation, full test suite, and E2E acceptance
 
 **Step 1: Run code generation**
 
@@ -1974,7 +2535,28 @@ make build
 
 Expected: `bin/openstack-operator` binary created.
 
-**Step 6: Commit any fixes**
+**Step 6: Run Phase 1 E2E acceptance (VM smoke test)**
+
+This closes the Phase 1 requirement from `PLAN.md` step 1.12.
+
+```bash
+# Deploy operator and sample control plane
+kubectl apply -k config/default/
+kubectl apply -f config/samples/controlplane_minimal.yaml
+
+# Wait until control plane reaches Ready
+kubectl wait --for=jsonpath='{.status.phase}'=Ready \
+  openstackcontrolplane/my-cloud -n openstack --timeout=45m
+
+# Smoke test through OpenStack API (requires openstack client + credentials)
+openstack token issue
+openstack server create --flavor m1.tiny --image cirros --network private phase1-smoke-vm
+openstack server show phase1-smoke-vm -f value -c status
+```
+
+Expected: server status reaches `ACTIVE`.
+
+**Step 7: Commit any fixes**
 
 ```bash
 git add -A
@@ -1987,7 +2569,7 @@ git commit -m "chore: fix lint and build issues"
 
 | Task | Component | Files Created | Tests |
 |------|-----------|---------------|-------|
-| 1 | Code generation | `zz_generated.deepcopy.go`, CRD YAMLs | - |
+| 1 | Code generation + Gateway API dep | `zz_generated.deepcopy.go`, CRD YAMLs | - |
 | 2 | Condition helpers | `internal/common/conditions.go` | 3 tests |
 | 3 | Secret helpers | `internal/common/secret.go`, `scheme.go` | 3 tests |
 | 4 | Finalizer helpers | `internal/common/finalizer.go` | 3 tests |
@@ -1997,14 +2579,16 @@ git commit -m "chore: fix lint and build issues"
 | 8 | Memcached controller | `internal/controller/memcached_controller.go` | 2 tests |
 | 9 | Database helpers | `internal/common/database.go` | 2 tests |
 | 10 | Endpoint helpers | `internal/common/endpoint.go` | 1 test |
-| 11 | Keystone controller | `internal/controller/keystone_controller.go` | 2+ tests |
-| 12 | Glance controller | `internal/controller/glance_controller.go` | 2+ tests |
-| 13 | Placement controller | `internal/controller/placement_controller.go` | 2+ tests |
-| 14 | OVN Network controller | `internal/controller/ovn_network_controller.go` | 2+ tests |
-| 15 | Neutron controller | `internal/controller/neutron_controller.go` | 2+ tests |
-| 16 | Nova controller | `internal/controller/nova_controller.go` | 2+ tests |
-| 17 | ControlPlane controller | `internal/controller/controlplane_controller.go` | 3+ tests |
-| 18 | Wire main.go | `cmd/main.go` (modify) | - |
-| 19 | Build validation | - | Full suite |
+| 11 | HTTPRoute helpers | `internal/common/httproute.go` | 2 tests |
+| 12 | Gateway sample | `config/samples/gateway.yaml` | - |
+| 13 | Keystone controller | `internal/controller/keystone_controller.go` | 2+ tests |
+| 14 | Glance controller | `internal/controller/glance_controller.go` | 2+ tests |
+| 15 | Placement controller | `internal/controller/placement_controller.go` | 2+ tests |
+| 16 | OVN Network controller | `internal/controller/ovn_network_controller.go` | 2+ tests |
+| 17 | Neutron controller | `internal/controller/neutron_controller.go` | 2+ tests |
+| 18 | Nova controller | `internal/controller/nova_controller.go` | 2+ tests |
+| 19 | ControlPlane controller | `internal/controller/controlplane_controller.go` | 3+ tests |
+| 20 | Wire main.go | `cmd/main.go` (modify) | - |
+| 21 | Build + acceptance validation | - | Full suite + VM E2E smoke |
 
-**Total: ~19 tasks, ~30+ tests, ~15 new files**
+**Total: ~21 tasks, ~35+ unit tests + 1 E2E smoke scenario, ~17 new files**
