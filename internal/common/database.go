@@ -17,6 +17,7 @@ import (
 type DatabaseParams struct {
 	Name           string
 	Namespace      string
+	Engine         string
 	DatabaseName   string
 	Username       string
 	SecretName     string
@@ -24,7 +25,7 @@ type DatabaseParams struct {
 	DatabaseHost   string
 }
 
-// EnsureDatabase creates a Job that provisions a database and user in PostgreSQL.
+// EnsureDatabase creates a Job that provisions a database and user in the selected SQL backend.
 func EnsureDatabase(ctx context.Context, c client.Client, params DatabaseParams, owner metav1.Object) error {
 	jobName := fmt.Sprintf("%s-db-create", params.Name)
 
@@ -37,13 +38,34 @@ func EnsureDatabase(ctx context.Context, c client.Client, params DatabaseParams,
 		return err
 	}
 
+	engine := params.Engine
+	if engine == "" {
+		engine = "postgresql"
+	}
+
+	image := "postgres:17"
+	rootPasswordVar := "ROOT_PASSWORD"
 	script := fmt.Sprintf(
-		`PGPASSWORD="$ROOT_PASSWORD" psql -h %s -U postgres -tc "SELECT 1 FROM pg_database WHERE datname='%s'" | grep -q 1 || PGPASSWORD="$ROOT_PASSWORD" psql -h %s -U postgres -c "CREATE DATABASE %s"; `+
-			`PGPASSWORD="$ROOT_PASSWORD" psql -h %s -U postgres -c "DO \$\$BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='%s') THEN CREATE ROLE %s LOGIN PASSWORD '$SERVICE_PASSWORD'; END IF; END\$\$; GRANT ALL PRIVILEGES ON DATABASE %s TO %s;"`,
-		params.DatabaseHost, params.DatabaseName,
-		params.DatabaseHost, params.DatabaseName,
-		params.DatabaseHost, params.Username, params.Username, params.DatabaseName, params.Username,
+		`PGPASSWORD="$%s" psql -h %s -U postgres -tc "SELECT 1 FROM pg_roles WHERE rolname='%s'" | grep -q 1 || PGPASSWORD="$%s" psql -h %s -U postgres -c "CREATE ROLE %s LOGIN PASSWORD '$SERVICE_PASSWORD'"; `+
+			`PGPASSWORD="$%s" psql -h %s -U postgres -tc "SELECT 1 FROM pg_database WHERE datname='%s'" | grep -q 1 || PGPASSWORD="$%s" psql -h %s -U postgres -c "CREATE DATABASE %s OWNER %s"; `+
+			`PGPASSWORD="$%s" psql -h %s -U postgres -c "ALTER DATABASE %s OWNER TO %s"; `+
+			`PGPASSWORD="$%s" psql -h %s -U postgres -d %s -c "ALTER SCHEMA public OWNER TO %s; GRANT ALL ON SCHEMA public TO %s;"`,
+		rootPasswordVar, params.DatabaseHost, params.Username, rootPasswordVar, params.DatabaseHost, params.Username,
+		rootPasswordVar, params.DatabaseHost, params.DatabaseName, rootPasswordVar, params.DatabaseHost, params.DatabaseName, params.Username,
+		rootPasswordVar, params.DatabaseHost, params.DatabaseName, params.Username,
+		rootPasswordVar, params.DatabaseHost, params.DatabaseName, params.Username, params.Username,
 	)
+	if engine == "mysql" || engine == "mariadb" {
+		if engine == "mysql" {
+			image = "mysql:8.4"
+		} else {
+			image = "mariadb:11"
+		}
+		script = fmt.Sprintf(
+			`mysql -h %s -u root -p"$%s" -e "CREATE DATABASE IF NOT EXISTS %s; CREATE USER IF NOT EXISTS '%s'@'%%' IDENTIFIED BY '$SERVICE_PASSWORD'; GRANT ALL ON %s.* TO '%s'@'%%'; FLUSH PRIVILEGES;"`,
+			params.DatabaseHost, rootPasswordVar, params.DatabaseName, params.Username, params.DatabaseName, params.Username,
+		)
+	}
 
 	backoffLimit := int32(4)
 	job := &batchv1.Job{
@@ -59,7 +81,7 @@ func EnsureDatabase(ctx context.Context, c client.Client, params DatabaseParams,
 					Containers: []corev1.Container{
 						{
 							Name:    "db-create",
-							Image:   "postgres:17",
+							Image:   image,
 							Command: []string{"sh", "-c", script},
 							Env: []corev1.EnvVar{
 								{

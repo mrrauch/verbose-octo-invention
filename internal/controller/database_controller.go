@@ -102,6 +102,14 @@ func (r *DatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 }
 
 func (r *DatabaseReconciler) ensureService(ctx context.Context, instance *openstackv1alpha1.Database) error {
+	engine := databaseEngineOrDefault(instance.Spec.Engine)
+	servicePort := int32(5432)
+	servicePortName := "postgresql"
+	if engine == openstackv1alpha1.DatabaseEngineMySQL || engine == openstackv1alpha1.DatabaseEngineMariaDB {
+		servicePort = 3306
+		servicePortName = "mysql"
+	}
+
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      instance.Name,
@@ -113,7 +121,7 @@ func (r *DatabaseReconciler) ensureService(ctx context.Context, instance *openst
 		svc.Spec.ClusterIP = corev1.ClusterIPNone
 		svc.Spec.Selector = labelsForDatabase(instance.Name)
 		svc.Spec.Ports = []corev1.ServicePort{
-			{Name: "postgresql", Port: 5432, Protocol: corev1.ProtocolTCP},
+			{Name: servicePortName, Port: servicePort, Protocol: corev1.ProtocolTCP},
 		}
 		return controllerutil.SetOwnerReference(instance, svc, r.Scheme)
 	})
@@ -126,12 +134,15 @@ func (r *DatabaseReconciler) ensureStatefulSet(ctx context.Context, instance *op
 		replicas = *instance.Spec.Replicas
 	}
 
-	image := images.ImageOrDefault(instance.Spec.Image, images.DefaultPostgreSQL)
+	engine := databaseEngineOrDefault(instance.Spec.Engine)
+	image := images.ImageOrDefault(instance.Spec.Image, defaultImageForDatabaseEngine(engine))
 
 	storageSize := instance.Spec.Storage.Size
 	if storageSize.IsZero() {
 		storageSize = resource.MustParse("10Gi")
 	}
+
+	container := databaseContainerForEngine(engine, image, secretName)
 
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -151,38 +162,7 @@ func (r *DatabaseReconciler) ensureStatefulSet(ctx context.Context, instance *op
 				Labels: labelsForDatabase(instance.Name),
 			},
 			Spec: corev1.PodSpec{
-				Containers: []corev1.Container{
-					{
-						Name:  "postgresql",
-						Image: image,
-						Ports: []corev1.ContainerPort{
-							{ContainerPort: 5432, Name: "postgresql"},
-						},
-						Env: []corev1.EnvVar{
-							{
-								Name: "POSTGRES_PASSWORD",
-								ValueFrom: &corev1.EnvVarSource{
-									SecretKeyRef: &corev1.SecretKeySelector{
-										LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
-										Key:                  "password",
-									},
-								},
-							},
-						},
-						VolumeMounts: []corev1.VolumeMount{
-							{Name: "data", MountPath: "/var/lib/postgresql/data"},
-						},
-						ReadinessProbe: &corev1.Probe{
-							ProbeHandler: corev1.ProbeHandler{
-								Exec: &corev1.ExecAction{
-									Command: []string{"pg_isready", "-U", "postgres"},
-								},
-							},
-							InitialDelaySeconds: 10,
-							PeriodSeconds:       5,
-						},
-					},
-				},
+				Containers: []corev1.Container{container},
 			},
 		}
 		sts.Spec.VolumeClaimTemplates = []corev1.PersistentVolumeClaim{
@@ -202,6 +182,83 @@ func (r *DatabaseReconciler) ensureStatefulSet(ctx context.Context, instance *op
 		return controllerutil.SetOwnerReference(instance, sts, r.Scheme)
 	})
 	return err
+}
+
+func defaultImageForDatabaseEngine(engine openstackv1alpha1.DatabaseEngine) string {
+	switch engine {
+	case openstackv1alpha1.DatabaseEngineMySQL:
+		return images.DefaultMySQL
+	case openstackv1alpha1.DatabaseEngineMariaDB:
+		return images.DefaultMariaDB
+	default:
+		return images.DefaultPostgreSQL
+	}
+}
+
+func databaseContainerForEngine(engine openstackv1alpha1.DatabaseEngine, image, secretName string) corev1.Container {
+	if engine == openstackv1alpha1.DatabaseEngineMySQL || engine == openstackv1alpha1.DatabaseEngineMariaDB {
+		return corev1.Container{
+			Name:  "mysql",
+			Image: image,
+			Ports: []corev1.ContainerPort{
+				{ContainerPort: 3306, Name: "mysql"},
+			},
+			Env: []corev1.EnvVar{
+				{
+					Name: "MYSQL_ROOT_PASSWORD",
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+							Key:                  "password",
+						},
+					},
+				},
+			},
+			VolumeMounts: []corev1.VolumeMount{
+				{Name: "data", MountPath: "/var/lib/mysql"},
+			},
+			ReadinessProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					Exec: &corev1.ExecAction{
+						Command: []string{"sh", "-c", `mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD"`},
+					},
+				},
+				InitialDelaySeconds: 10,
+				PeriodSeconds:       5,
+			},
+		}
+	}
+
+	return corev1.Container{
+		Name:  "postgresql",
+		Image: image,
+		Ports: []corev1.ContainerPort{
+			{ContainerPort: 5432, Name: "postgresql"},
+		},
+		Env: []corev1.EnvVar{
+			{
+				Name: "POSTGRES_PASSWORD",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+						Key:                  "password",
+					},
+				},
+			},
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: "data", MountPath: "/var/lib/postgresql/data"},
+		},
+		ReadinessProbe: &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				Exec: &corev1.ExecAction{
+					Command: []string{"pg_isready", "-U", "postgres"},
+				},
+			},
+			InitialDelaySeconds: 10,
+			PeriodSeconds:       5,
+		},
+	}
 }
 
 // SetupWithManager sets up the controller with the Manager.

@@ -159,8 +159,48 @@ func TestKeystoneReconciler_UsesControlPlaneScopedDatabaseDependency(t *testing.
 		t.Fatalf("expected command to reference my-cloud-database.openstack.svc, got %q", got)
 	}
 
-	rootPasswordRef := dbJob.Spec.Template.Spec.Containers[0].Env[0].ValueFrom.SecretKeyRef.LocalObjectReference.Name
+	rootPasswordRef := dbJob.Spec.Template.Spec.Containers[0].Env[0].ValueFrom.SecretKeyRef.Name
 	if rootPasswordRef != "my-cloud-database-root-password" {
 		t.Fatalf("expected database root secret my-cloud-database-root-password, got %q", rootPasswordRef)
+	}
+}
+
+func TestKeystoneReconciler_UsesConfiguredDatabaseSecretAndEngine(t *testing.T) {
+	scheme := common.SetupScheme()
+	ks := &openstackv1alpha1.Keystone{
+		ObjectMeta: metav1.ObjectMeta{Name: "keystone", Namespace: "openstack", Finalizers: []string{common.FinalizerName}},
+		Spec: openstackv1alpha1.KeystoneSpec{
+			Database: openstackv1alpha1.DatabaseConfig{
+				SecretName: "existing-db-secret",
+				Engine:     openstackv1alpha1.DatabaseEngineMySQL,
+			},
+		},
+	}
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(ks).
+		WithStatusSubresource(ks).
+		Build()
+
+	r := &KeystoneReconciler{Client: client, Scheme: scheme}
+	_, _ = r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "keystone", Namespace: "openstack"},
+	})
+
+	serviceSecret := &corev1.Secret{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: "existing-db-secret", Namespace: "openstack"}, serviceSecret); err != nil {
+		t.Fatalf("expected configured db secret to be used/created: %v", err)
+	}
+
+	dbJob := &batchv1.Job{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: "keystone-db-create", Namespace: "openstack"}, dbJob); err != nil {
+		t.Fatalf("expected db-create job: %v", err)
+	}
+	container := dbJob.Spec.Template.Spec.Containers[0]
+	if container.Image != "mysql:8.4" {
+		t.Fatalf("expected mysql db-create job image, got %s", container.Image)
+	}
+	if len(container.Command) < 3 || !strings.Contains(container.Command[2], "mysql -h database.openstack.svc") {
+		t.Fatalf("expected mysql db-create script, got %v", container.Command)
 	}
 }

@@ -65,7 +65,8 @@ func (r *PlacementReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	)
 
 	// Ensure DB password secret
-	dbSecretName := fmt.Sprintf("%s-db-password", instance.Name)
+	dbSecretName := serviceDatabaseSecretName(instance.Name, instance.Spec.Database)
+	dbEngine := databaseEngineOrDefault(instance.Spec.Database.Engine)
 	if err := common.EnsureSecret(ctx, r.Client, dbSecretName, instance.Namespace, map[string]int{"password": 32}, instance); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -75,6 +76,7 @@ func (r *PlacementReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if err := common.EnsureDatabase(ctx, r.Client, common.DatabaseParams{
 		Name:           instance.Name,
 		Namespace:      instance.Namespace,
+		Engine:         string(dbEngine),
 		DatabaseName:   "placement",
 		Username:       "placement",
 		SecretName:     dbSecretName,

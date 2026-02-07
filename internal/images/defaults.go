@@ -4,6 +4,8 @@ package images
 // All images are from the Kolla project for the 2025.1 (Epoxy) release.
 const (
 	DefaultPostgreSQL    = "postgres:17"
+	DefaultMySQL         = "mysql:8.4"
+	DefaultMariaDB       = "mariadb:11"
 	DefaultRabbitMQ      = "quay.io/openstack.kolla/rabbitmq:2025.1"
 	DefaultMemcached     = "quay.io/openstack.kolla/memcached:2025.1"
 	DefaultKeystone      = "quay.io/openstack.kolla/keystone:2025.1"

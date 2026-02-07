@@ -2,6 +2,7 @@ package common
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -35,6 +36,44 @@ func TestEnsureDatabase_CreatesJob(t *testing.T) {
 	}, job)
 	if err != nil {
 		t.Fatalf("expected db-create Job to be created: %v", err)
+	}
+}
+
+func TestEnsureDatabase_CreatesMySQLJob(t *testing.T) {
+	scheme := SetupScheme()
+	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	params := DatabaseParams{
+		Name:           "placement",
+		Namespace:      "openstack",
+		Engine:         "mysql",
+		DatabaseName:   "placement",
+		Username:       "placement",
+		SecretName:     "placement-db-password",
+		DatabaseSecret: "database-root-password",
+		DatabaseHost:   "database.openstack.svc",
+	}
+
+	err := EnsureDatabase(context.Background(), client, params, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	job := &batchv1.Job{}
+	err = client.Get(context.Background(), types.NamespacedName{
+		Name:      "placement-db-create",
+		Namespace: "openstack",
+	}, job)
+	if err != nil {
+		t.Fatalf("expected db-create Job to be created: %v", err)
+	}
+
+	container := job.Spec.Template.Spec.Containers[0]
+	if container.Image != "mysql:8.4" {
+		t.Fatalf("expected mysql image mysql:8.4, got %s", container.Image)
+	}
+	if len(container.Command) < 3 || !strings.Contains(container.Command[2], "mysql -h database.openstack.svc") {
+		t.Fatalf("expected mysql command in script, got %v", container.Command)
 	}
 }
 

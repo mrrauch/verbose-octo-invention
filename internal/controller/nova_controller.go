@@ -66,13 +66,14 @@ func (r *NovaReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	)
 
 	// Ensure DB password secret
-	dbSecretName := fmt.Sprintf("%s-db-password", instance.Name)
+	dbSecretName := serviceDatabaseSecretName(instance.Name, instance.Spec.Database)
+	dbEngine := databaseEngineOrDefault(instance.Spec.Database.Engine)
 	if err := common.EnsureSecret(ctx, r.Client, dbSecretName, instance.Namespace, map[string]int{"password": 32}, instance); err != nil {
 		return ctrl.Result{}, err
 	}
 
 	// Ensure databases (nova, nova_api, nova_cell0) via custom Job
-	if err := r.ensureDBCreate(ctx, instance, dbSecretName); err != nil {
+	if err := r.ensureDBCreate(ctx, instance, dbSecretName, dbEngine); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -216,7 +217,7 @@ func (r *NovaReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	return ctrl.Result{}, nil
 }
 
-func (r *NovaReconciler) ensureDBCreate(ctx context.Context, instance *openstackv1alpha1.Nova, secretName string) error {
+func (r *NovaReconciler) ensureDBCreate(ctx context.Context, instance *openstackv1alpha1.Nova, secretName string, engine openstackv1alpha1.DatabaseEngine) error {
 	jobName := fmt.Sprintf("%s-db-create", instance.Name)
 
 	existing := &batchv1.Job{}
@@ -229,13 +230,44 @@ func (r *NovaReconciler) ensureDBCreate(ctx context.Context, instance *openstack
 	}
 
 	dbHost, dbRootSecret := databaseDependency(instance.Name, "-nova", instance.Namespace)
+	jobImage := "postgres:17"
 	script := fmt.Sprintf(
-		`PGPASSWORD="$ROOT_PASSWORD" psql -h %s -U postgres -c "SELECT 1 FROM pg_database WHERE datname='nova'" | grep -q 1 || PGPASSWORD="$ROOT_PASSWORD" psql -h %s -U postgres -c "CREATE DATABASE nova"; `+
-			`PGPASSWORD="$ROOT_PASSWORD" psql -h %s -U postgres -c "SELECT 1 FROM pg_database WHERE datname='nova_api'" | grep -q 1 || PGPASSWORD="$ROOT_PASSWORD" psql -h %s -U postgres -c "CREATE DATABASE nova_api"; `+
-			`PGPASSWORD="$ROOT_PASSWORD" psql -h %s -U postgres -c "SELECT 1 FROM pg_database WHERE datname='nova_cell0'" | grep -q 1 || PGPASSWORD="$ROOT_PASSWORD" psql -h %s -U postgres -c "CREATE DATABASE nova_cell0"; `+
-			`PGPASSWORD="$ROOT_PASSWORD" psql -h %s -U postgres -c "DO \$\$BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='nova') THEN CREATE ROLE nova LOGIN PASSWORD '$SERVICE_PASSWORD'; END IF; END\$\$; GRANT ALL PRIVILEGES ON DATABASE nova TO nova; GRANT ALL PRIVILEGES ON DATABASE nova_api TO nova; GRANT ALL PRIVILEGES ON DATABASE nova_cell0 TO nova;"`,
-		dbHost, dbHost, dbHost, dbHost, dbHost, dbHost, dbHost,
+		`PGPASSWORD="$ROOT_PASSWORD" psql -h %s -U postgres -tc "SELECT 1 FROM pg_roles WHERE rolname='nova'" | grep -q 1 || PGPASSWORD="$ROOT_PASSWORD" psql -h %s -U postgres -c "CREATE ROLE nova LOGIN PASSWORD '$SERVICE_PASSWORD'"; `+
+			`PGPASSWORD="$ROOT_PASSWORD" psql -h %s -U postgres -tc "SELECT 1 FROM pg_database WHERE datname='nova'" | grep -q 1 || PGPASSWORD="$ROOT_PASSWORD" psql -h %s -U postgres -c "CREATE DATABASE nova OWNER nova"; `+
+			`PGPASSWORD="$ROOT_PASSWORD" psql -h %s -U postgres -tc "SELECT 1 FROM pg_database WHERE datname='nova_api'" | grep -q 1 || PGPASSWORD="$ROOT_PASSWORD" psql -h %s -U postgres -c "CREATE DATABASE nova_api OWNER nova"; `+
+			`PGPASSWORD="$ROOT_PASSWORD" psql -h %s -U postgres -tc "SELECT 1 FROM pg_database WHERE datname='nova_cell0'" | grep -q 1 || PGPASSWORD="$ROOT_PASSWORD" psql -h %s -U postgres -c "CREATE DATABASE nova_cell0 OWNER nova"; `+
+			`PGPASSWORD="$ROOT_PASSWORD" psql -h %s -U postgres -c "ALTER DATABASE nova OWNER TO nova; ALTER DATABASE nova_api OWNER TO nova; ALTER DATABASE nova_cell0 OWNER TO nova"; `+
+			`PGPASSWORD="$ROOT_PASSWORD" psql -h %s -U postgres -d nova -c "ALTER SCHEMA public OWNER TO nova; GRANT ALL ON SCHEMA public TO nova"; `+
+			`PGPASSWORD="$ROOT_PASSWORD" psql -h %s -U postgres -d nova_api -c "ALTER SCHEMA public OWNER TO nova; GRANT ALL ON SCHEMA public TO nova"; `+
+			`PGPASSWORD="$ROOT_PASSWORD" psql -h %s -U postgres -d nova_cell0 -c "ALTER SCHEMA public OWNER TO nova; GRANT ALL ON SCHEMA public TO nova";`,
+		dbHost, dbHost,
+		dbHost, dbHost,
+		dbHost, dbHost,
+		dbHost, dbHost,
+		dbHost,
+		dbHost,
+		dbHost,
+		dbHost,
 	)
+	if engine == openstackv1alpha1.DatabaseEngineMySQL || engine == openstackv1alpha1.DatabaseEngineMariaDB {
+		if engine == openstackv1alpha1.DatabaseEngineMySQL {
+			jobImage = images.DefaultMySQL
+		} else {
+			jobImage = images.DefaultMariaDB
+		}
+		script = fmt.Sprintf(
+			`mysql -h %s -u root -p"$ROOT_PASSWORD" -e "`+
+				`CREATE DATABASE IF NOT EXISTS nova; `+
+				`CREATE DATABASE IF NOT EXISTS nova_api; `+
+				`CREATE DATABASE IF NOT EXISTS nova_cell0; `+
+				`CREATE USER IF NOT EXISTS 'nova'@'%%' IDENTIFIED BY '$SERVICE_PASSWORD'; `+
+				`GRANT ALL ON nova.* TO 'nova'@'%%'; `+
+				`GRANT ALL ON nova_api.* TO 'nova'@'%%'; `+
+				`GRANT ALL ON nova_cell0.* TO 'nova'@'%%'; `+
+				`FLUSH PRIVILEGES;"`,
+			dbHost,
+		)
+	}
 
 	backoffLimit := int32(4)
 	job := &batchv1.Job{
@@ -252,7 +284,7 @@ func (r *NovaReconciler) ensureDBCreate(ctx context.Context, instance *openstack
 					Containers: []corev1.Container{
 						{
 							Name:    "db-create",
-							Image:   "postgres:17",
+							Image:   jobImage,
 							Command: []string{"sh", "-c", script},
 							Env: []corev1.EnvVar{
 								{

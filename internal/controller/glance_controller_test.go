@@ -120,7 +120,7 @@ func TestGlanceReconciler_NotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
-	if result.Requeue {
-		t.Error("expected no requeue")
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue, got RequeueAfter=%v", result.RequeueAfter)
 	}
 }

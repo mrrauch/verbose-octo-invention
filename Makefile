@@ -3,6 +3,12 @@
 IMG ?= openstack-operator:latest
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 LOCALBIN ?= $(shell pwd)/bin
+ifeq (,$(shell go env GOBIN))
+GOBIN=$(shell go env GOPATH)/bin
+else
+GOBIN=$(shell go env GOBIN)
+endif
+GOLANGCI_LINT = $(GOBIN)/golangci-lint
 
 .PHONY: all
 all: generate fmt vet build
@@ -33,8 +39,15 @@ test: generate fmt vet ## Run tests.
 	go test ./... -coverprofile cover.out
 
 .PHONY: lint
-lint: ## Run golangci-lint.
-	golangci-lint run
+lint: golangci-lint ## Run golangci-lint.
+	$(GOLANGCI_LINT) run
+
+.PHONY: lint-fix
+lint-fix: golangci-lint ## Run golangci-lint with auto-fix.
+	$(GOLANGCI_LINT) run --fix
+
+.PHONY: ci
+ci: lint test ## Run lint and tests (CI/local quality gate).
 
 ##@ Build
 
@@ -78,6 +91,10 @@ undeploy: ## Undeploy operator from the cluster.
 controller-gen: $(CONTROLLER_GEN) ## Install controller-gen.
 $(CONTROLLER_GEN): $(LOCALBIN)
 	GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.17.2
+
+.PHONY: golangci-lint
+golangci-lint: ## Install golangci-lint if missing.
+	@test -f $(GOLANGCI_LINT) || go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.63.4
 
 $(LOCALBIN):
 	mkdir -p $(LOCALBIN)

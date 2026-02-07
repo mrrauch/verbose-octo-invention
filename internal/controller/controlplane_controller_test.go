@@ -69,6 +69,9 @@ func TestControlPlaneReconciler_AdvancesToIdentity(t *testing.T) {
 		Spec: openstackv1alpha1.OpenStackControlPlaneSpec{
 			NetworkBackend: "ovn",
 			PublicDomain:   "cloud.example.com",
+			Database: openstackv1alpha1.DatabaseSpec{
+				Engine: openstackv1alpha1.DatabaseEngineMySQL,
+			},
 			GatewayRef: openstackv1alpha1.GatewayRef{
 				Name:      "edge-gw",
 				Namespace: "edge-system",
@@ -106,6 +109,9 @@ func TestControlPlaneReconciler_AdvancesToIdentity(t *testing.T) {
 	}
 	if ks.Spec.GatewayRef.Name != "edge-gw" || ks.Spec.GatewayRef.Namespace != "edge-system" {
 		t.Fatalf("expected inherited gatewayRef edge-system/edge-gw, got %s/%s", ks.Spec.GatewayRef.Namespace, ks.Spec.GatewayRef.Name)
+	}
+	if ks.Spec.Database.Engine != openstackv1alpha1.DatabaseEngineMySQL {
+		t.Fatalf("expected inherited database engine mysql, got %q", ks.Spec.Database.Engine)
 	}
 
 	fresh := &openstackv1alpha1.OpenStackControlPlane{}
@@ -159,7 +165,7 @@ func TestControlPlaneReconciler_NotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
-	if result.Requeue {
-		t.Error("expected no requeue")
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue, got RequeueAfter=%v", result.RequeueAfter)
 	}
 }

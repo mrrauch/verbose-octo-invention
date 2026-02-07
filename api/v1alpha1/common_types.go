@@ -33,6 +33,11 @@ type DatabaseConfig struct {
 	// The operator auto-generates this if left empty.
 	// +optional
 	SecretName string `json:"secretName,omitempty"`
+
+	// Engine selects which SQL backend this service should use.
+	// +kubebuilder:validation:Enum=postgresql;mysql;mariadb
+	// +optional
+	Engine DatabaseEngine `json:"engine,omitempty"`
 }
 
 // RabbitMQConfig defines the message queue connection parameters.

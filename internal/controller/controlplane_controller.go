@@ -140,7 +140,7 @@ func (r *ControlPlaneReconciler) reconcileIdentity(ctx context.Context, instance
 	}
 
 	keystoneSpec := instance.Spec.Keystone
-	applyDefaults(&keystoneSpec.PublicHostname, &keystoneSpec.GatewayRef, "keystone", instance)
+	applyDefaults(&keystoneSpec.PublicHostname, &keystoneSpec.GatewayRef, &keystoneSpec.Database, "keystone", instance)
 
 	if err := r.ensureChildCR(ctx, instance, &openstackv1alpha1.Keystone{
 		ObjectMeta: metav1.ObjectMeta{Name: name + "-keystone", Namespace: ns},
@@ -167,7 +167,7 @@ func (r *ControlPlaneReconciler) reconcileCoreServices(ctx context.Context, inst
 	}
 
 	glanceSpec := instance.Spec.Glance
-	applyDefaults(&glanceSpec.PublicHostname, &glanceSpec.GatewayRef, "glance", instance)
+	applyDefaults(&glanceSpec.PublicHostname, &glanceSpec.GatewayRef, &glanceSpec.Database, "glance", instance)
 	if err := r.ensureChildCR(ctx, instance, &openstackv1alpha1.Glance{
 		ObjectMeta: metav1.ObjectMeta{Name: name + "-glance", Namespace: ns},
 		Spec:       glanceSpec,
@@ -176,7 +176,7 @@ func (r *ControlPlaneReconciler) reconcileCoreServices(ctx context.Context, inst
 	}
 
 	placementSpec := instance.Spec.Placement
-	applyDefaults(&placementSpec.PublicHostname, &placementSpec.GatewayRef, "placement", instance)
+	applyDefaults(&placementSpec.PublicHostname, &placementSpec.GatewayRef, &placementSpec.Database, "placement", instance)
 	if err := r.ensureChildCR(ctx, instance, &openstackv1alpha1.Placement{
 		ObjectMeta: metav1.ObjectMeta{Name: name + "-placement", Namespace: ns},
 		Spec:       placementSpec,
@@ -185,7 +185,7 @@ func (r *ControlPlaneReconciler) reconcileCoreServices(ctx context.Context, inst
 	}
 
 	neutronSpec := instance.Spec.Neutron
-	applyDefaults(&neutronSpec.PublicHostname, &neutronSpec.GatewayRef, "neutron", instance)
+	applyDefaults(&neutronSpec.PublicHostname, &neutronSpec.GatewayRef, &neutronSpec.Database, "neutron", instance)
 	if err := r.ensureChildCR(ctx, instance, &openstackv1alpha1.Neutron{
 		ObjectMeta: metav1.ObjectMeta{Name: name + "-neutron", Namespace: ns},
 		Spec:       neutronSpec,
@@ -215,7 +215,7 @@ func (r *ControlPlaneReconciler) reconcileCompute(ctx context.Context, instance 
 	}
 
 	novaSpec := instance.Spec.Nova
-	applyDefaults(&novaSpec.PublicHostname, &novaSpec.GatewayRef, "nova", instance)
+	applyDefaults(&novaSpec.PublicHostname, &novaSpec.GatewayRef, &novaSpec.Database, "nova", instance)
 	if err := r.ensureChildCR(ctx, instance, &openstackv1alpha1.Nova{
 		ObjectMeta: metav1.ObjectMeta{Name: name + "-nova", Namespace: ns},
 		Spec:       novaSpec,
@@ -349,9 +349,9 @@ func getConditions(obj client.Object) []metav1.Condition {
 	}
 }
 
-// applyDefaults sets PublicHostname and GatewayRef on a child service spec when the child
+// applyDefaults sets PublicHostname, GatewayRef, and Database.Engine on a child service spec when the child
 // does not provide its own values.
-func applyDefaults(hostname *string, gatewayRef *openstackv1alpha1.GatewayRef, serviceName string, cp *openstackv1alpha1.OpenStackControlPlane) {
+func applyDefaults(hostname *string, gatewayRef *openstackv1alpha1.GatewayRef, database *openstackv1alpha1.DatabaseConfig, serviceName string, cp *openstackv1alpha1.OpenStackControlPlane) {
 	if *hostname == "" {
 		domain := cp.Spec.PublicDomain
 		if domain == "" {
@@ -362,6 +362,9 @@ func applyDefaults(hostname *string, gatewayRef *openstackv1alpha1.GatewayRef, s
 
 	if gatewayRef.Name == "" {
 		*gatewayRef = cp.Spec.GatewayRef
+	}
+	if database.Engine == "" {
+		database.Engine = databaseEngineOrDefault(cp.Spec.Database.Engine)
 	}
 }
 

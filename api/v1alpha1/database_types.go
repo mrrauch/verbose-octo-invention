@@ -5,11 +5,13 @@ import (
 )
 
 // DatabaseEngine selects the database backend.
-// +kubebuilder:validation:Enum=postgresql
+// +kubebuilder:validation:Enum=postgresql;mysql;mariadb
 type DatabaseEngine string
 
 const (
 	DatabaseEnginePostgreSQL DatabaseEngine = "postgresql"
+	DatabaseEngineMySQL      DatabaseEngine = "mysql"
+	DatabaseEngineMariaDB    DatabaseEngine = "mariadb"
 )
 
 // DatabaseSpec defines the desired state of a Database deployment.

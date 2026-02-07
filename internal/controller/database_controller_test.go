@@ -80,7 +80,51 @@ func TestDatabaseReconciler_NotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error for missing CR, got: %v", err)
 	}
-	if result.Requeue {
-		t.Error("expected no requeue for missing CR")
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue for missing CR, got RequeueAfter=%v", result.RequeueAfter)
+	}
+}
+
+func TestDatabaseReconciler_MySQLEngine(t *testing.T) {
+	scheme := common.SetupScheme()
+	database := &openstackv1alpha1.Database{
+		ObjectMeta: metav1.ObjectMeta{Name: "db-mysql", Namespace: "openstack", Finalizers: []string{common.FinalizerName}},
+		Spec: openstackv1alpha1.DatabaseSpec{
+			Engine: openstackv1alpha1.DatabaseEngineMySQL,
+		},
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(database).
+		WithStatusSubresource(database).
+		Build()
+
+	r := &DatabaseReconciler{Client: client, Scheme: scheme}
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "db-mysql", Namespace: "openstack"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile error: %v", err)
+	}
+
+	sts := &appsv1.StatefulSet{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: "db-mysql", Namespace: "openstack"}, sts); err != nil {
+		t.Fatalf("expected StatefulSet to be created: %v", err)
+	}
+	container := sts.Spec.Template.Spec.Containers[0]
+	if container.Ports[0].ContainerPort != 3306 {
+		t.Fatalf("expected mysql container port 3306, got %d", container.Ports[0].ContainerPort)
+	}
+	if container.Image != "mysql:8.4" {
+		t.Fatalf("expected mysql image mysql:8.4, got %s", container.Image)
+	}
+
+	svc := &corev1.Service{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: "db-mysql", Namespace: "openstack"}, svc); err != nil {
+		t.Fatalf("expected Service to be created: %v", err)
+	}
+	if svc.Spec.Ports[0].Port != 3306 {
+		t.Fatalf("expected mysql service port 3306, got %d", svc.Spec.Ports[0].Port)
 	}
 }

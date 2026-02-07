@@ -66,7 +66,8 @@ func (r *GlanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	)
 
 	// Ensure DB password secret
-	dbSecretName := fmt.Sprintf("%s-db-password", instance.Name)
+	dbSecretName := serviceDatabaseSecretName(instance.Name, instance.Spec.Database)
+	dbEngine := databaseEngineOrDefault(instance.Spec.Database.Engine)
 	if err := common.EnsureSecret(ctx, r.Client, dbSecretName, instance.Namespace, map[string]int{"password": 32}, instance); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -76,6 +77,7 @@ func (r *GlanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	if err := common.EnsureDatabase(ctx, r.Client, common.DatabaseParams{
 		Name:           instance.Name,
 		Namespace:      instance.Namespace,
+		Engine:         string(dbEngine),
 		DatabaseName:   "glance",
 		Username:       "glance",
 		SecretName:     dbSecretName,
