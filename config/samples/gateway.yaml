@@ -1,0 +1,28 @@
+# Sample Gateway for the OpenStack operator.
+# Apply this BEFORE creating an OpenStackControlPlane CR.
+# Adjust gatewayClassName to match your installed Gateway API implementation
+# (e.g., "eg" for Envoy Gateway, "istio" for Istio, "cilium" for Cilium).
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: openstack-gateway
+  namespace: openstack
+spec:
+  gatewayClassName: eg
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: openstack-tls
+      allowedRoutes:
+        namespaces:
+          from: Same
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
