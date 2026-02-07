@@ -55,6 +55,7 @@ func (r *NovaReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		if err := r.Update(ctx, instance); err != nil {
 			return ctrl.Result{}, err
 		}
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	// Set status to Reconciling
@@ -76,12 +77,12 @@ func (r *NovaReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	}
 
 	// Wait for db-create to complete
-	dbCreateDone, err := common.IsJobComplete(ctx, r.Client, fmt.Sprintf("%s-db-create", instance.Name), instance.Namespace)
+	dbCreateDone, result, err := waitForJobCompletion(ctx, r.Client, fmt.Sprintf("%s-db-create", instance.Name), instance.Namespace, 5*time.Second, 2*time.Second)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if !dbCreateDone {
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		return result, nil
 	}
 
 	// Ensure db-sync via custom Job (api_db sync + db sync)
@@ -90,17 +91,24 @@ func (r *NovaReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	}
 
 	// Wait for db-sync to complete
-	dbSyncDone, err := common.IsJobComplete(ctx, r.Client, fmt.Sprintf("%s-db-sync", instance.Name), instance.Namespace)
+	dbSyncDone, result, err := waitForJobCompletion(ctx, r.Client, fmt.Sprintf("%s-db-sync", instance.Name), instance.Namespace, 5*time.Second, 2*time.Second)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if !dbSyncDone {
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		return result, nil
 	}
 
 	// Ensure cell setup Job
 	if err := r.ensureCellSetup(ctx, instance); err != nil {
 		return ctrl.Result{}, err
+	}
+	cellSetupDone, result, err := waitForJobCompletion(ctx, r.Client, fmt.Sprintf("%s-cell-setup", instance.Name), instance.Namespace, 5*time.Second, 2*time.Second)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !cellSetupDone {
+		return result, nil
 	}
 
 	// Ensure Deployments
@@ -158,6 +166,7 @@ func (r *NovaReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	// Ensure Keystone endpoint
 	internalURL := fmt.Sprintf("http://%s.%s.svc:8774/v2.1", apiName, instance.Namespace)
 	publicURL := fmt.Sprintf("https://%s/v2.1", instance.Spec.PublicHostname)
+	keystoneURL, keystoneSecret := keystoneDependency(instance.Name, "-nova", instance.Namespace)
 	if err := common.EnsureKeystoneEndpoint(ctx, r.Client, common.EndpointParams{
 		Name:           instance.Name,
 		Namespace:      instance.Namespace,
@@ -167,11 +176,18 @@ func (r *NovaReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		PublicURL:      publicURL,
 		AdminURL:       internalURL,
 		Region:         "RegionOne",
-		KeystoneSecret: "keystone-admin-password",
-		KeystoneURL:    "http://keystone-api.openstack.svc:5000/v3",
+		KeystoneSecret: keystoneSecret,
+		KeystoneURL:    keystoneURL,
 		BootstrapImage: images.DefaultKeystone,
 	}, instance); err != nil {
 		return ctrl.Result{}, err
+	}
+	endpointDone, result, err := waitForJobCompletion(ctx, r.Client, fmt.Sprintf("%s-endpoint-create", instance.Name), instance.Namespace, 5*time.Second, 2*time.Second)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !endpointDone {
+		return result, nil
 	}
 
 	// Update status with apiEndpoint
@@ -212,15 +228,14 @@ func (r *NovaReconciler) ensureDBCreate(ctx context.Context, instance *openstack
 		return err
 	}
 
-	script := `mysql -h mariadb.openstack.svc -u root -p"$ROOT_PASSWORD" -e "` +
-		`CREATE DATABASE IF NOT EXISTS nova; ` +
-		`CREATE DATABASE IF NOT EXISTS nova_api; ` +
-		`CREATE DATABASE IF NOT EXISTS nova_cell0; ` +
-		`CREATE USER IF NOT EXISTS 'nova'@'%' IDENTIFIED BY '$SERVICE_PASSWORD'; ` +
-		`GRANT ALL ON nova.* TO 'nova'@'%'; ` +
-		`GRANT ALL ON nova_api.* TO 'nova'@'%'; ` +
-		`GRANT ALL ON nova_cell0.* TO 'nova'@'%'; ` +
-		`FLUSH PRIVILEGES;"`
+	dbHost, dbRootSecret := databaseDependency(instance.Name, "-nova", instance.Namespace)
+	script := fmt.Sprintf(
+		`PGPASSWORD="$ROOT_PASSWORD" psql -h %s -U postgres -c "SELECT 1 FROM pg_database WHERE datname='nova'" | grep -q 1 || PGPASSWORD="$ROOT_PASSWORD" psql -h %s -U postgres -c "CREATE DATABASE nova"; `+
+			`PGPASSWORD="$ROOT_PASSWORD" psql -h %s -U postgres -c "SELECT 1 FROM pg_database WHERE datname='nova_api'" | grep -q 1 || PGPASSWORD="$ROOT_PASSWORD" psql -h %s -U postgres -c "CREATE DATABASE nova_api"; `+
+			`PGPASSWORD="$ROOT_PASSWORD" psql -h %s -U postgres -c "SELECT 1 FROM pg_database WHERE datname='nova_cell0'" | grep -q 1 || PGPASSWORD="$ROOT_PASSWORD" psql -h %s -U postgres -c "CREATE DATABASE nova_cell0"; `+
+			`PGPASSWORD="$ROOT_PASSWORD" psql -h %s -U postgres -c "DO \$\$BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='nova') THEN CREATE ROLE nova LOGIN PASSWORD '$SERVICE_PASSWORD'; END IF; END\$\$; GRANT ALL PRIVILEGES ON DATABASE nova TO nova; GRANT ALL PRIVILEGES ON DATABASE nova_api TO nova; GRANT ALL PRIVILEGES ON DATABASE nova_cell0 TO nova;"`,
+		dbHost, dbHost, dbHost, dbHost, dbHost, dbHost, dbHost,
+	)
 
 	backoffLimit := int32(4)
 	job := &batchv1.Job{
@@ -237,14 +252,14 @@ func (r *NovaReconciler) ensureDBCreate(ctx context.Context, instance *openstack
 					Containers: []corev1.Container{
 						{
 							Name:    "db-create",
-							Image:   "mariadb:11",
+							Image:   "postgres:17",
 							Command: []string{"sh", "-c", script},
 							Env: []corev1.EnvVar{
 								{
 									Name: "ROOT_PASSWORD",
 									ValueFrom: &corev1.EnvVarSource{
 										SecretKeyRef: &corev1.SecretKeySelector{
-											LocalObjectReference: corev1.LocalObjectReference{Name: "mariadb-root-password"},
+											LocalObjectReference: corev1.LocalObjectReference{Name: dbRootSecret},
 											Key:                  "password",
 										},
 									},
@@ -349,7 +364,7 @@ func (r *NovaReconciler) ensureCellSetup(ctx context.Context, instance *openstac
 						{
 							Name:    "cell-setup",
 							Image:   image,
-							Command: []string{"sh", "-c", "nova-manage cell_v2 map_cell0 && nova-manage cell_v2 create_cell --name cell1 || true"},
+							Command: []string{"sh", "-c", "set -e; nova-manage cell_v2 map_cell0; if ! nova-manage cell_v2 list_cells | grep -q ' cell1 '; then nova-manage cell_v2 create_cell --name cell1; fi"},
 						},
 					},
 				},
@@ -361,76 +376,58 @@ func (r *NovaReconciler) ensureCellSetup(ctx context.Context, instance *openstac
 }
 
 func (r *NovaReconciler) ensureDeployment(ctx context.Context, instance *openstackv1alpha1.Nova, name, image, component string, replicas int32, ports []corev1.ContainerPort) error {
-	dep := &appsv1.Deployment{}
-	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: instance.Namespace}, dep)
-	if err == nil {
-		return nil
-	}
-	if !errors.IsNotFound(err) {
-		return err
-	}
-
-	dep = &appsv1.Deployment{
+	dep := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: instance.Namespace,
-			Labels:    labelsForNova(instance.Name, component),
 		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: &replicas,
-			Selector: &metav1.LabelSelector{
-				MatchLabels: labelsForNova(instance.Name, component),
+	}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, dep, func() error {
+		dep.Labels = labelsForNova(instance.Name, component)
+		dep.Spec.Replicas = &replicas
+		dep.Spec.Selector = &metav1.LabelSelector{
+			MatchLabels: labelsForNova(instance.Name, component),
+		}
+		dep.Spec.Template = corev1.PodTemplateSpec{
+			ObjectMeta: metav1.ObjectMeta{
+				Labels: labelsForNova(instance.Name, component),
 			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: labelsForNova(instance.Name, component),
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  component,
-							Image: image,
-							Ports: ports,
-						},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  component,
+						Image: image,
+						Ports: ports,
 					},
 				},
 			},
-		},
-	}
-	_ = controllerutil.SetOwnerReference(instance, dep, r.Scheme)
-	return r.Create(ctx, dep)
+		}
+		return controllerutil.SetOwnerReference(instance, dep, r.Scheme)
+	})
+	return err
 }
 
 func (r *NovaReconciler) ensureService(ctx context.Context, instance *openstackv1alpha1.Nova, name string) error {
-	svc := &corev1.Service{}
-	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: instance.Namespace}, svc)
-	if err == nil {
-		return nil
-	}
-	if !errors.IsNotFound(err) {
-		return err
-	}
-
-	svc = &corev1.Service{
+	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: instance.Namespace,
-			Labels:    labelsForNova(instance.Name, "api"),
-		},
-		Spec: corev1.ServiceSpec{
-			Selector: labelsForNova(instance.Name, "api"),
-			Ports: []corev1.ServicePort{
-				{
-					Name:       "api",
-					Port:       8774,
-					TargetPort: intstr.FromInt32(8774),
-					Protocol:   corev1.ProtocolTCP,
-				},
-			},
 		},
 	}
-	_ = controllerutil.SetOwnerReference(instance, svc, r.Scheme)
-	return r.Create(ctx, svc)
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
+		svc.Labels = labelsForNova(instance.Name, "api")
+		svc.Spec.Selector = labelsForNova(instance.Name, "api")
+		svc.Spec.Ports = []corev1.ServicePort{
+			{
+				Name:       "api",
+				Port:       8774,
+				TargetPort: intstr.FromInt32(8774),
+				Protocol:   corev1.ProtocolTCP,
+			},
+		}
+		return controllerutil.SetOwnerReference(instance, svc, r.Scheme)
+	})
+	return err
 }
 
 // SetupWithManager sets up the controller with the Manager.

@@ -8,7 +8,6 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -55,6 +54,7 @@ func (r *PlacementReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if err := r.Update(ctx, instance); err != nil {
 			return ctrl.Result{}, err
 		}
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	// Set status to Reconciling
@@ -71,25 +71,26 @@ func (r *PlacementReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	// Ensure database
+	dbHost, dbRootSecret := databaseDependency(instance.Name, "-placement", instance.Namespace)
 	if err := common.EnsureDatabase(ctx, r.Client, common.DatabaseParams{
-		Name:          instance.Name,
-		Namespace:     instance.Namespace,
-		DatabaseName:  "placement",
-		Username:      "placement",
-		SecretName:    dbSecretName,
-		MariaDBSecret: "mariadb-root-password",
-		MariaDBHost:   "mariadb.openstack.svc",
+		Name:           instance.Name,
+		Namespace:      instance.Namespace,
+		DatabaseName:   "placement",
+		Username:       "placement",
+		SecretName:     dbSecretName,
+		DatabaseSecret: dbRootSecret,
+		DatabaseHost:   dbHost,
 	}, instance); err != nil {
 		return ctrl.Result{}, err
 	}
 
 	// Wait for db-create to complete
-	dbCreateDone, err := common.IsJobComplete(ctx, r.Client, fmt.Sprintf("%s-db-create", instance.Name), instance.Namespace)
+	dbCreateDone, result, err := waitForJobCompletion(ctx, r.Client, fmt.Sprintf("%s-db-create", instance.Name), instance.Namespace, 5*time.Second, 2*time.Second)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if !dbCreateDone {
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		return result, nil
 	}
 
 	// Ensure db_sync
@@ -105,12 +106,12 @@ func (r *PlacementReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	// Wait for db-sync to complete
-	dbSyncDone, err := common.IsJobComplete(ctx, r.Client, fmt.Sprintf("%s-db-sync", instance.Name), instance.Namespace)
+	dbSyncDone, result, err := waitForJobCompletion(ctx, r.Client, fmt.Sprintf("%s-db-sync", instance.Name), instance.Namespace, 5*time.Second, 2*time.Second)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if !dbSyncDone {
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		return result, nil
 	}
 
 	// Ensure Deployment
@@ -141,6 +142,7 @@ func (r *PlacementReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Ensure Keystone endpoint
 	internalURL := fmt.Sprintf("http://%s.%s.svc:8778", deploymentName, instance.Namespace)
 	publicURL := fmt.Sprintf("https://%s", instance.Spec.PublicHostname)
+	keystoneURL, keystoneSecret := keystoneDependency(instance.Name, "-placement", instance.Namespace)
 	if err := common.EnsureKeystoneEndpoint(ctx, r.Client, common.EndpointParams{
 		Name:           instance.Name,
 		Namespace:      instance.Namespace,
@@ -150,11 +152,18 @@ func (r *PlacementReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		PublicURL:      publicURL,
 		AdminURL:       internalURL,
 		Region:         "RegionOne",
-		KeystoneSecret: "keystone-admin-password",
-		KeystoneURL:    "http://keystone-api.openstack.svc:5000/v3",
+		KeystoneSecret: keystoneSecret,
+		KeystoneURL:    keystoneURL,
 		BootstrapImage: images.DefaultKeystone,
 	}, instance); err != nil {
 		return ctrl.Result{}, err
+	}
+	endpointDone, result, err := waitForJobCompletion(ctx, r.Client, fmt.Sprintf("%s-endpoint-create", instance.Name), instance.Namespace, 5*time.Second, 2*time.Second)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !endpointDone {
+		return result, nil
 	}
 
 	// Update status with apiEndpoint
@@ -184,83 +193,65 @@ func (r *PlacementReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 }
 
 func (r *PlacementReconciler) ensureDeployment(ctx context.Context, instance *openstackv1alpha1.Placement, name, image string) error {
-	dep := &appsv1.Deployment{}
-	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: instance.Namespace}, dep)
-	if err == nil {
-		return nil
-	}
-	if !errors.IsNotFound(err) {
-		return err
-	}
-
 	replicas := int32(1)
 	if instance.Spec.Replicas != nil {
 		replicas = *instance.Spec.Replicas
 	}
 
-	dep = &appsv1.Deployment{
+	dep := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: instance.Namespace,
-			Labels:    labelsForPlacement(instance.Name),
 		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: &replicas,
-			Selector: &metav1.LabelSelector{
-				MatchLabels: labelsForPlacement(instance.Name),
+	}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, dep, func() error {
+		dep.Labels = labelsForPlacement(instance.Name)
+		dep.Spec.Replicas = &replicas
+		dep.Spec.Selector = &metav1.LabelSelector{
+			MatchLabels: labelsForPlacement(instance.Name),
+		}
+		dep.Spec.Template = corev1.PodTemplateSpec{
+			ObjectMeta: metav1.ObjectMeta{
+				Labels: labelsForPlacement(instance.Name),
 			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: labelsForPlacement(instance.Name),
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "placement-api",
-							Image: image,
-							Ports: []corev1.ContainerPort{
-								{ContainerPort: 8778, Name: "api"},
-							},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "placement-api",
+						Image: image,
+						Ports: []corev1.ContainerPort{
+							{ContainerPort: 8778, Name: "api"},
 						},
 					},
 				},
 			},
-		},
-	}
-	_ = controllerutil.SetOwnerReference(instance, dep, r.Scheme)
-	return r.Create(ctx, dep)
+		}
+		return controllerutil.SetOwnerReference(instance, dep, r.Scheme)
+	})
+	return err
 }
 
 func (r *PlacementReconciler) ensureService(ctx context.Context, instance *openstackv1alpha1.Placement, name string) error {
-	svc := &corev1.Service{}
-	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: instance.Namespace}, svc)
-	if err == nil {
-		return nil
-	}
-	if !errors.IsNotFound(err) {
-		return err
-	}
-
-	svc = &corev1.Service{
+	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: instance.Namespace,
-			Labels:    labelsForPlacement(instance.Name),
-		},
-		Spec: corev1.ServiceSpec{
-			Selector: labelsForPlacement(instance.Name),
-			Ports: []corev1.ServicePort{
-				{
-					Name:       "api",
-					Port:       8778,
-					TargetPort: intstr.FromInt32(8778),
-					Protocol:   corev1.ProtocolTCP,
-				},
-			},
 		},
 	}
-	_ = controllerutil.SetOwnerReference(instance, svc, r.Scheme)
-	return r.Create(ctx, svc)
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
+		svc.Labels = labelsForPlacement(instance.Name)
+		svc.Spec.Selector = labelsForPlacement(instance.Name)
+		svc.Spec.Ports = []corev1.ServicePort{
+			{
+				Name:       "api",
+				Port:       8778,
+				TargetPort: intstr.FromInt32(8778),
+				Protocol:   corev1.ProtocolTCP,
+			},
+		}
+		return controllerutil.SetOwnerReference(instance, svc, r.Scheme)
+	})
+	return err
 }
 
 // SetupWithManager sets up the controller with the Manager.

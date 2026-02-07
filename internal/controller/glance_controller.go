@@ -8,7 +8,6 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -56,6 +55,7 @@ func (r *GlanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		if err := r.Update(ctx, instance); err != nil {
 			return ctrl.Result{}, err
 		}
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	// Set status to Reconciling
@@ -72,25 +72,26 @@ func (r *GlanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 
 	// Ensure database
+	dbHost, dbRootSecret := databaseDependency(instance.Name, "-glance", instance.Namespace)
 	if err := common.EnsureDatabase(ctx, r.Client, common.DatabaseParams{
-		Name:          instance.Name,
-		Namespace:     instance.Namespace,
-		DatabaseName:  "glance",
-		Username:      "glance",
-		SecretName:    dbSecretName,
-		MariaDBSecret: "mariadb-root-password",
-		MariaDBHost:   "mariadb.openstack.svc",
+		Name:           instance.Name,
+		Namespace:      instance.Namespace,
+		DatabaseName:   "glance",
+		Username:       "glance",
+		SecretName:     dbSecretName,
+		DatabaseSecret: dbRootSecret,
+		DatabaseHost:   dbHost,
 	}, instance); err != nil {
 		return ctrl.Result{}, err
 	}
 
 	// Wait for db-create to complete
-	dbCreateDone, err := common.IsJobComplete(ctx, r.Client, fmt.Sprintf("%s-db-create", instance.Name), instance.Namespace)
+	dbCreateDone, result, err := waitForJobCompletion(ctx, r.Client, fmt.Sprintf("%s-db-create", instance.Name), instance.Namespace, 5*time.Second, 2*time.Second)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if !dbCreateDone {
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		return result, nil
 	}
 
 	// Ensure db_sync
@@ -106,12 +107,12 @@ func (r *GlanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 
 	// Wait for db-sync to complete
-	dbSyncDone, err := common.IsJobComplete(ctx, r.Client, fmt.Sprintf("%s-db-sync", instance.Name), instance.Namespace)
+	dbSyncDone, result, err := waitForJobCompletion(ctx, r.Client, fmt.Sprintf("%s-db-sync", instance.Name), instance.Namespace, 5*time.Second, 2*time.Second)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if !dbSyncDone {
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		return result, nil
 	}
 
 	// Ensure Deployment
@@ -142,6 +143,7 @@ func (r *GlanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// Ensure Keystone endpoint
 	internalURL := fmt.Sprintf("http://%s.%s.svc:9292", deploymentName, instance.Namespace)
 	publicURL := fmt.Sprintf("https://%s", instance.Spec.PublicHostname)
+	keystoneURL, keystoneSecret := keystoneDependency(instance.Name, "-glance", instance.Namespace)
 	if err := common.EnsureKeystoneEndpoint(ctx, r.Client, common.EndpointParams{
 		Name:           instance.Name,
 		Namespace:      instance.Namespace,
@@ -151,11 +153,18 @@ func (r *GlanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		PublicURL:      publicURL,
 		AdminURL:       internalURL,
 		Region:         "RegionOne",
-		KeystoneSecret: "keystone-admin-password",
-		KeystoneURL:    "http://keystone-api.openstack.svc:5000/v3",
+		KeystoneSecret: keystoneSecret,
+		KeystoneURL:    keystoneURL,
 		BootstrapImage: images.DefaultKeystone,
 	}, instance); err != nil {
 		return ctrl.Result{}, err
+	}
+	endpointDone, result, err := waitForJobCompletion(ctx, r.Client, fmt.Sprintf("%s-endpoint-create", instance.Name), instance.Namespace, 5*time.Second, 2*time.Second)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !endpointDone {
+		return result, nil
 	}
 
 	// Update status with apiEndpoint
@@ -185,15 +194,6 @@ func (r *GlanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 }
 
 func (r *GlanceReconciler) ensureDeployment(ctx context.Context, instance *openstackv1alpha1.Glance, name, image string) error {
-	dep := &appsv1.Deployment{}
-	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: instance.Namespace}, dep)
-	if err == nil {
-		return nil
-	}
-	if !errors.IsNotFound(err) {
-		return err
-	}
-
 	replicas := int32(1)
 	if instance.Spec.Replicas != nil {
 		replicas = *instance.Spec.Replicas
@@ -228,101 +228,83 @@ func (r *GlanceReconciler) ensureDeployment(ctx context.Context, instance *opens
 		}
 	}
 
-	dep = &appsv1.Deployment{
+	dep := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: instance.Namespace,
-			Labels:    labelsForGlance(instance.Name),
-		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: &replicas,
-			Selector: &metav1.LabelSelector{
-				MatchLabels: labelsForGlance(instance.Name),
-			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: labelsForGlance(instance.Name),
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "glance-api",
-							Image: image,
-							Ports: []corev1.ContainerPort{
-								{ContainerPort: 9292, Name: "api"},
-							},
-							VolumeMounts: volumeMounts,
-						},
-					},
-					Volumes: volumes,
-				},
-			},
 		},
 	}
-	_ = controllerutil.SetOwnerReference(instance, dep, r.Scheme)
-	return r.Create(ctx, dep)
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, dep, func() error {
+		dep.Labels = labelsForGlance(instance.Name)
+		dep.Spec.Replicas = &replicas
+		dep.Spec.Selector = &metav1.LabelSelector{
+			MatchLabels: labelsForGlance(instance.Name),
+		}
+		dep.Spec.Template = corev1.PodTemplateSpec{
+			ObjectMeta: metav1.ObjectMeta{
+				Labels: labelsForGlance(instance.Name),
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "glance-api",
+						Image: image,
+						Ports: []corev1.ContainerPort{
+							{ContainerPort: 9292, Name: "api"},
+						},
+						VolumeMounts: volumeMounts,
+					},
+				},
+				Volumes: volumes,
+			},
+		}
+		return controllerutil.SetOwnerReference(instance, dep, r.Scheme)
+	})
+	return err
 }
 
 func (r *GlanceReconciler) ensurePVC(ctx context.Context, instance *openstackv1alpha1.Glance, name string, size resource.Quantity) error {
-	pvc := &corev1.PersistentVolumeClaim{}
-	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: instance.Namespace}, pvc)
-	if err == nil {
-		return nil
-	}
-	if !errors.IsNotFound(err) {
-		return err
-	}
-
-	pvc = &corev1.PersistentVolumeClaim{
+	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: instance.Namespace,
-			Labels:    labelsForGlance(instance.Name),
-		},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-			Resources: corev1.VolumeResourceRequirements{
-				Requests: corev1.ResourceList{
-					corev1.ResourceStorage: size,
-				},
-			},
-			StorageClassName: instance.Spec.Storage.StorageClassName,
 		},
 	}
-	_ = controllerutil.SetOwnerReference(instance, pvc, r.Scheme)
-	return r.Create(ctx, pvc)
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, pvc, func() error {
+		pvc.Labels = labelsForGlance(instance.Name)
+		pvc.Spec.AccessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}
+		pvc.Spec.Resources = corev1.VolumeResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceStorage: size,
+			},
+		}
+		pvc.Spec.StorageClassName = instance.Spec.Storage.StorageClassName
+		return controllerutil.SetOwnerReference(instance, pvc, r.Scheme)
+	})
+	return err
 }
 
 func (r *GlanceReconciler) ensureService(ctx context.Context, instance *openstackv1alpha1.Glance, name string) error {
-	svc := &corev1.Service{}
-	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: instance.Namespace}, svc)
-	if err == nil {
-		return nil
-	}
-	if !errors.IsNotFound(err) {
-		return err
-	}
-
-	svc = &corev1.Service{
+	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: instance.Namespace,
-			Labels:    labelsForGlance(instance.Name),
-		},
-		Spec: corev1.ServiceSpec{
-			Selector: labelsForGlance(instance.Name),
-			Ports: []corev1.ServicePort{
-				{
-					Name:       "api",
-					Port:       9292,
-					TargetPort: intstr.FromInt32(9292),
-					Protocol:   corev1.ProtocolTCP,
-				},
-			},
 		},
 	}
-	_ = controllerutil.SetOwnerReference(instance, svc, r.Scheme)
-	return r.Create(ctx, svc)
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
+		svc.Labels = labelsForGlance(instance.Name)
+		svc.Spec.Selector = labelsForGlance(instance.Name)
+		svc.Spec.Ports = []corev1.ServicePort{
+			{
+				Name:       "api",
+				Port:       9292,
+				TargetPort: intstr.FromInt32(9292),
+				Protocol:   corev1.ProtocolTCP,
+			},
+		}
+		return controllerutil.SetOwnerReference(instance, svc, r.Scheme)
+	})
+	return err
 }
 
 // SetupWithManager sets up the controller with the Manager.

@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -20,7 +21,7 @@ import (
 func TestKeystoneReconciler_CreatesResources(t *testing.T) {
 	scheme := common.SetupScheme()
 	ks := &openstackv1alpha1.Keystone{
-		ObjectMeta: metav1.ObjectMeta{Name: "keystone", Namespace: "openstack"},
+		ObjectMeta: metav1.ObjectMeta{Name: "keystone", Namespace: "openstack", Finalizers: []string{common.FinalizerName}},
 		Spec: openstackv1alpha1.KeystoneSpec{
 			PublicHostname: "keystone.example.com",
 			GatewayRef: openstackv1alpha1.GatewayRef{
@@ -126,5 +127,40 @@ func TestKeystoneReconciler_NotFound(t *testing.T) {
 	}
 	if result.Requeue {
 		t.Error("expected no requeue")
+	}
+}
+
+func TestKeystoneReconciler_UsesControlPlaneScopedDatabaseDependency(t *testing.T) {
+	scheme := common.SetupScheme()
+	ks := &openstackv1alpha1.Keystone{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-cloud-keystone", Namespace: "openstack", Finalizers: []string{common.FinalizerName}},
+	}
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(ks).
+		WithStatusSubresource(ks).
+		Build()
+
+	r := &KeystoneReconciler{Client: client, Scheme: scheme}
+	_, _ = r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "my-cloud-keystone", Namespace: "openstack"},
+	})
+
+	dbJob := &batchv1.Job{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: "my-cloud-keystone-db-create", Namespace: "openstack"}, dbJob); err != nil {
+		t.Fatalf("expected db-create job: %v", err)
+	}
+
+	cmd := dbJob.Spec.Template.Spec.Containers[0].Command
+	if len(cmd) < 3 || cmd[2] == "" {
+		t.Fatalf("expected db-create job command to be set, got %#v", cmd)
+	}
+	if got := cmd[2]; got == "" || !strings.Contains(got, "my-cloud-database.openstack.svc") {
+		t.Fatalf("expected command to reference my-cloud-database.openstack.svc, got %q", got)
+	}
+
+	rootPasswordRef := dbJob.Spec.Template.Spec.Containers[0].Env[0].ValueFrom.SecretKeyRef.LocalObjectReference.Name
+	if rootPasswordRef != "my-cloud-database-root-password" {
+		t.Fatalf("expected database root secret my-cloud-database-root-password, got %q", rootPasswordRef)
 	}
 }

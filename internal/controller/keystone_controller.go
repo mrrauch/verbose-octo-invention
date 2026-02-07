@@ -55,6 +55,7 @@ func (r *KeystoneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		if err := r.Update(ctx, instance); err != nil {
 			return ctrl.Result{}, err
 		}
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	// Set status to Reconciling
@@ -77,25 +78,26 @@ func (r *KeystoneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	// Ensure database
+	dbHost, dbRootSecret := databaseDependency(instance.Name, "-keystone", instance.Namespace)
 	if err := common.EnsureDatabase(ctx, r.Client, common.DatabaseParams{
-		Name:          instance.Name,
-		Namespace:     instance.Namespace,
-		DatabaseName:  "keystone",
-		Username:      "keystone",
-		SecretName:    dbSecretName,
-		MariaDBSecret: "mariadb-root-password",
-		MariaDBHost:   "mariadb.openstack.svc",
+		Name:           instance.Name,
+		Namespace:      instance.Namespace,
+		DatabaseName:   "keystone",
+		Username:       "keystone",
+		SecretName:     dbSecretName,
+		DatabaseSecret: dbRootSecret,
+		DatabaseHost:   dbHost,
 	}, instance); err != nil {
 		return ctrl.Result{}, err
 	}
 
 	// Wait for db-create to complete
-	dbCreateDone, err := common.IsJobComplete(ctx, r.Client, fmt.Sprintf("%s-db-create", instance.Name), instance.Namespace)
+	dbCreateDone, result, err := waitForJobCompletion(ctx, r.Client, fmt.Sprintf("%s-db-create", instance.Name), instance.Namespace, 5*time.Second, 2*time.Second)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if !dbCreateDone {
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		return result, nil
 	}
 
 	// Ensure db_sync
@@ -111,12 +113,12 @@ func (r *KeystoneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	// Wait for db-sync to complete
-	dbSyncDone, err := common.IsJobComplete(ctx, r.Client, fmt.Sprintf("%s-db-sync", instance.Name), instance.Namespace)
+	dbSyncDone, result, err := waitForJobCompletion(ctx, r.Client, fmt.Sprintf("%s-db-sync", instance.Name), instance.Namespace, 5*time.Second, 2*time.Second)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if !dbSyncDone {
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		return result, nil
 	}
 
 	// Ensure Deployment
@@ -148,6 +150,13 @@ func (r *KeystoneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if err := r.ensureBootstrap(ctx, instance, image, adminSecretName, deploymentName); err != nil {
 		return ctrl.Result{}, err
 	}
+	bootstrapDone, result, err := waitForJobCompletion(ctx, r.Client, fmt.Sprintf("%s-bootstrap", instance.Name), instance.Namespace, 5*time.Second, 2*time.Second)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !bootstrapDone {
+		return result, nil
+	}
 
 	// Update status with apiEndpoint
 	instance.Status.APIEndpoint = fmt.Sprintf("http://%s.%s.svc:5000/v3", deploymentName, instance.Namespace)
@@ -176,83 +185,65 @@ func (r *KeystoneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 }
 
 func (r *KeystoneReconciler) ensureDeployment(ctx context.Context, instance *openstackv1alpha1.Keystone, name, image string) error {
-	dep := &appsv1.Deployment{}
-	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: instance.Namespace}, dep)
-	if err == nil {
-		return nil
-	}
-	if !errors.IsNotFound(err) {
-		return err
-	}
-
 	replicas := int32(1)
 	if instance.Spec.Replicas != nil {
 		replicas = *instance.Spec.Replicas
 	}
 
-	dep = &appsv1.Deployment{
+	dep := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: instance.Namespace,
-			Labels:    labelsForKeystone(instance.Name),
 		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: &replicas,
-			Selector: &metav1.LabelSelector{
-				MatchLabels: labelsForKeystone(instance.Name),
+	}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, dep, func() error {
+		dep.Labels = labelsForKeystone(instance.Name)
+		dep.Spec.Replicas = &replicas
+		dep.Spec.Selector = &metav1.LabelSelector{
+			MatchLabels: labelsForKeystone(instance.Name),
+		}
+		dep.Spec.Template = corev1.PodTemplateSpec{
+			ObjectMeta: metav1.ObjectMeta{
+				Labels: labelsForKeystone(instance.Name),
 			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: labelsForKeystone(instance.Name),
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "keystone-api",
-							Image: image,
-							Ports: []corev1.ContainerPort{
-								{ContainerPort: 5000, Name: "api"},
-							},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "keystone-api",
+						Image: image,
+						Ports: []corev1.ContainerPort{
+							{ContainerPort: 5000, Name: "api"},
 						},
 					},
 				},
 			},
-		},
-	}
-	_ = controllerutil.SetOwnerReference(instance, dep, r.Scheme)
-	return r.Create(ctx, dep)
+		}
+		return controllerutil.SetOwnerReference(instance, dep, r.Scheme)
+	})
+	return err
 }
 
 func (r *KeystoneReconciler) ensureService(ctx context.Context, instance *openstackv1alpha1.Keystone, name string) error {
-	svc := &corev1.Service{}
-	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: instance.Namespace}, svc)
-	if err == nil {
-		return nil
-	}
-	if !errors.IsNotFound(err) {
-		return err
-	}
-
-	svc = &corev1.Service{
+	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: instance.Namespace,
-			Labels:    labelsForKeystone(instance.Name),
-		},
-		Spec: corev1.ServiceSpec{
-			Selector: labelsForKeystone(instance.Name),
-			Ports: []corev1.ServicePort{
-				{
-					Name:       "api",
-					Port:       5000,
-					TargetPort: intstr.FromInt32(5000),
-					Protocol:   corev1.ProtocolTCP,
-				},
-			},
 		},
 	}
-	_ = controllerutil.SetOwnerReference(instance, svc, r.Scheme)
-	return r.Create(ctx, svc)
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
+		svc.Labels = labelsForKeystone(instance.Name)
+		svc.Spec.Selector = labelsForKeystone(instance.Name)
+		svc.Spec.Ports = []corev1.ServicePort{
+			{
+				Name:       "api",
+				Port:       5000,
+				TargetPort: intstr.FromInt32(5000),
+				Protocol:   corev1.ProtocolTCP,
+			},
+		}
+		return controllerutil.SetOwnerReference(instance, svc, r.Scheme)
+	})
+	return err
 }
 
 func (r *KeystoneReconciler) ensureBootstrap(ctx context.Context, instance *openstackv1alpha1.Keystone, image, adminSecretName, deploymentName string) error {
