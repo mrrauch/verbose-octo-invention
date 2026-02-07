@@ -43,7 +43,7 @@ more), along with their shared infrastructure dependencies.
                  │                     │                       │
         ┌────────┼────────┐            │         ┌─────────────┼─────────────┐
         │        │        │            │         │             │             │
-     MariaDB  RabbitMQ Memcached   Keystone    Core       Extended       UI/Ops
+    Database  RabbitMQ Memcached   Keystone    Core       Extended       UI/Ops
                                                 │             │             │
                                     ┌───────────┤    ┌────────┤      ┌──────┤
                                     │           │    │        │      │      │
@@ -82,7 +82,7 @@ order after their specific dependencies are satisfied.
 
 ```
 Phase 1 — Infrastructure
-  1. MariaDB (Galera)          — all services need a database
+  1. Database (PostgreSQL)     — all services need a database
   2. RabbitMQ                  — inter-process messaging
   3. Memcached                 — token caching
 
@@ -151,7 +151,7 @@ spec:
       kind: ClusterIssuer
 
   # Per-service templates (inline)
-  mariadb:
+  database:
     replicas: 3
     storageSize: 50Gi
   rabbitmq:
@@ -192,7 +192,7 @@ Each service gets its own CRD under the `openstack.k8s.io` API group:
 | CRD Kind | API Version | Owner |
 |----------|------------|-------|
 | `OpenStackControlPlane` | `v1alpha1` | meta-operator (top-level) |
-| `MariaDB` | `v1alpha1` | mariadb-controller |
+| `Database` | `v1alpha1` | database-controller |
 | `RabbitMQ` | `v1alpha1` | rabbitmq-controller |
 | `Memcached` | `v1alpha1` | memcached-controller |
 | `OpenStackDataPlane` | `v1alpha1` | dataplane-controller |
@@ -263,7 +263,7 @@ Each service gets its own CRD under the `openstack.k8s.io` API group:
 OpenStackControlPlane (parent)
   │
   ├── Infrastructure
-  │   ├── ownerRef → MariaDB
+  │   ├── ownerRef → Database
   │   ├── ownerRef → RabbitMQ
   │   ├── ownerRef → Memcached
   │   ├── ownerRef → CephStorage
@@ -334,7 +334,7 @@ Extended services are only created when explicitly enabled in the control plane 
 Reconcile(OpenStackControlPlane)
   │
   ├─ Phase: Infrastructure
-  │   ├─ Ensure MariaDB CR exists & status=Ready
+  │   ├─ Ensure Database CR exists & status=Ready
   │   ├─ Ensure RabbitMQ CR exists & status=Ready
   │   ├─ Ensure Memcached CR exists & status=Ready
   │   ├─ Ensure CephStorage CR exists & status=Ready (if storageBackend=ceph)
@@ -560,7 +560,7 @@ openstack-operator/
 │       ├── openstack_controlplane_types.go
 │       │
 │       │   # Infrastructure
-│       ├── mariadb_types.go
+│       ├── database_types.go
 │       ├── rabbitmq_types.go
 │       ├── memcached_types.go
 │       ├── ceph_storage_types.go
@@ -615,7 +615,7 @@ openstack-operator/
 │   ├── controller/
 │   │   ├── openstack_controlplane_controller.go
 │   │   │   # Infrastructure
-│   │   ├── mariadb_controller.go
+│   │   ├── database_controller.go
 │   │   ├── rabbitmq_controller.go
 │   │   ├── memcached_controller.go
 │   │   ├── ceph_storage_controller.go
@@ -726,7 +726,7 @@ openstack-operator/
 | Step | Deliverable |
 |------|-------------|
 | 1.1 | Scaffold project with kubebuilder, define all API types |
-| 1.2 | Implement `MariaDB` controller (single-instance, PVC-backed) |
+| 1.2 | Implement `Database` controller (single-instance, PVC-backed, PostgreSQL) |
 | 1.3 | Implement `RabbitMQ` controller (single-instance) |
 | 1.4 | Implement `Memcached` controller (single-instance) |
 | 1.5 | Implement `Keystone` controller (deploy, db-sync, bootstrap) |
@@ -752,7 +752,7 @@ openstack-operator/
 
 | Step | Deliverable |
 |------|-------------|
-| 3.1 | MariaDB Galera clustering (3-node) |
+| 3.1 | Database HA clustering (PostgreSQL replication) |
 | 3.2 | RabbitMQ clustering (3-node, quorum queues) |
 | 3.3 | Multi-replica API services behind Ingress |
 | 3.4 | OVN NB/SB database HA (Raft clustering) |
@@ -826,7 +826,7 @@ remaining services.
 | 7.10 | `Adjutant` controller (API + Django task engine) | Keystone |
 | 7.11 | `Storlets` controller (proxy middleware, Docker gateway) | Swift |
 | 7.12 | Upgrade orchestration (rolling upgrades between OpenStack releases) |  |
-| 7.13 | Backup/restore for MariaDB and Ceph (Freezer integration) | Freezer |
+| 7.13 | Backup/restore for Database and Ceph (Freezer integration) | Freezer |
 
 ### Phase 8 — Advanced Networking & Multi-Site
 
@@ -972,7 +972,7 @@ Use upstream OpenStack container images from `quay.io/openstack.kolla/` (Kolla-b
 ### 11.4 Database Lifecycle
 
 Each service controller:
-1. Creates a database and user in MariaDB (via a Job or direct SQL)
+1. Creates a database and user in PostgreSQL (via a Job running psql)
 2. Runs `<service>-manage db_sync` as a Kubernetes Job
 3. Waits for Job completion before creating the Deployment
 4. On upgrade, runs db_sync again before rolling out new Deployment

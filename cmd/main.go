@@ -57,7 +57,7 @@ func main() {
 		name  string
 		setup func(mgr ctrl.Manager) error
 	}{
-		{"MariaDB", (&controller.MariaDBReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
+		{"Database", (&controller.DatabaseReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
 		{"RabbitMQ", (&controller.RabbitMQReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
 		{"Memcached", (&controller.MemcachedReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
 		{"OVNNetwork", (&controller.OVNNetworkReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
